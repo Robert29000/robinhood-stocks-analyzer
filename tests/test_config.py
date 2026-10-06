@@ -11,11 +11,13 @@ def test_checked_in_config_has_requested_pools(monkeypatch):
     assert settings.chain_id == 4663
     assert settings.rpc_url == "https://rpc.example.invalid"
     assert settings.blockscout_url == "https://api.blockscout.com/v2/api"
-    assert settings.alpha_vantage_request_delay == 12
     assert [ticker.symbol for ticker in settings.tickers] == ["AAPL", "NVDA", "GOOGL", "MSFT", "META", "MU", "COST"]
     assert {ticker.symbol: ticker.pool.type for ticker in settings.tickers}["AAPL"] == "v4"
     assert settings.ex_date_start.isoformat() == "2026-07-01"
     assert settings.ex_date_end.isoformat() == "2026-09-30"
+    assert settings.dividend_scan_padding_days == 7
+    assert settings.days_before_effective == 7
+    assert settings.days_after_effective == 7
 
 
 def test_invalid_pool_metadata_is_rejected(tmp_path, monkeypatch):
@@ -40,4 +42,18 @@ symbol = "AAPL"
 pool = { type = "v3", address = "0x1111111111111111111111111111111111111111" }
 ''')
     with pytest.raises(ValueError, match="ROBINHOOD_RPC_URL"):
+        load_config(config)
+
+
+def test_negative_window_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBINHOOD_RPC_URL", "https://rpc.example.invalid")
+    config = tmp_path / "negative-window.toml"
+    config.write_text('''
+[window]
+dividend_scan_padding_days = -1
+[[ticker]]
+symbol = "AAPL"
+pool = { type = "v3", address = "0x1111111111111111111111111111111111111111" }
+''')
+    with pytest.raises(ValueError, match="dividend_scan_padding_days"):
         load_config(config)

@@ -33,7 +33,8 @@ class Settings:
     robinhood_assets_url: str
     ex_date_start: date
     ex_date_end: date
-    days_before_ex_date: int
+    dividend_scan_padding_days: int
+    days_before_effective: int
     days_after_effective: int
     raw_dir: Path
     output_dir: Path
@@ -103,6 +104,16 @@ def load_config(path: str | Path) -> Settings:
     alpha_vantage_request_delay = float(services.get("alpha_vantage_request_delay", 12))
     if alpha_vantage_request_delay < 0:
         raise ValueError("[services].alpha_vantage_request_delay must be non-negative")
+    dividend_scan_padding_days = int(window.get("dividend_scan_padding_days", 7))
+    days_before_effective = int(window.get("days_before_effective", 7))
+    days_after_effective = int(window.get("days_after_effective", 7))
+    for key, value in (
+        ("dividend_scan_padding_days", dividend_scan_padding_days),
+        ("days_before_effective", days_before_effective),
+        ("days_after_effective", days_after_effective),
+    ):
+        if value < 0:
+            raise ValueError(f"[window].{key} must be non-negative")
     return Settings(
         config_path=config_path,
         chain_id=chain_id,
@@ -113,8 +124,9 @@ def load_config(path: str | Path) -> Settings:
         robinhood_assets_url=str(services.get("robinhood_assets_url", "https://api.robinhood.com/rhj/assets")),
         ex_date_start=start,
         ex_date_end=end,
-        days_before_ex_date=int(window.get("days_before_ex_date", 7)),
-        days_after_effective=int(window.get("days_after_effective", 7)),
+        dividend_scan_padding_days=dividend_scan_padding_days,
+        days_before_effective=days_before_effective,
+        days_after_effective=days_after_effective,
         raw_dir=raw_dir,
         output_dir=output_dir,
         stablecoin_address=_address(str(chain.get("stablecoin_address", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168")), "stablecoin"),

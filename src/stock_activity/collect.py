@@ -20,11 +20,106 @@ from .contracts import (
 )
 from .decoders import decode_multiplier, decode_v4_initialize
 from .rawstore import RawStore, atomic_json
-from .utils import hex_int, parse_log_timestamp
+from .utils import hex_int, log_id, parse_log_timestamp
+
+
+ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
+Window = tuple[datetime, datetime]
 
 
 def _midnight(value: date) -> datetime:
     return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+
+def _merge_windows(windows: list[Window]) -> list[Window]:
+    """Merge overlapping or touching half-open time windows."""
+    merged: list[Window] = []
+    for start, end in sorted(windows):
+        if start >= end:
+            continue
+        if merged and start <= merged[-1][1]:
+            merged[-1] = merged[-1][0], max(merged[-1][1], end)
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _dividend_scan_windows(
+    dividends: list[dict[str, Any]], padding_days: int, cutoff: datetime,
+) -> tuple[list[dict[str, str]], dict[str, list[Window]]]:
+    """Build per-dividend multiplier-discovery windows and merged ticker queries."""
+    rows: list[dict[str, str]] = []
+    by_ticker: dict[str, list[Window]] = {}
+    padding = timedelta(days=padding_days)
+    for dividend in dividends:
+        ticker = str(dividend["ticker"])
+        try:
+            ex_date = date.fromisoformat(dividend["ex_dividend_date"])
+            payment_date = date.fromisoformat(dividend["payment_date"])
+        except (KeyError, ValueError) as exc:
+            raise ServiceError(f"{ticker}: dividend has an invalid ex-date or payment date: {dividend}") from exc
+        if payment_date < ex_date:
+            raise ServiceError(
+                f"{ticker}: dividend payment date {payment_date} precedes ex-date {ex_date}"
+            )
+        start = _midnight(ex_date) - padding
+        requested_end = _midnight(payment_date) + padding + timedelta(days=1)
+        fetch_end = min(requested_end, cutoff)
+        rows.append({
+            "ticker": ticker,
+            "ex_dividend_date": ex_date.isoformat(),
+            "payment_date": payment_date.isoformat(),
+            "start": start.isoformat(),
+            "end": requested_end.isoformat(),
+            "fetch_end": fetch_end.isoformat(),
+        })
+        if start < fetch_end:
+            by_ticker.setdefault(ticker, []).append((start, fetch_end))
+    return rows, {ticker: _merge_windows(windows) for ticker, windows in by_ticker.items()}
+
+
+def _event_activity_windows(
+    updates: list[dict[str, Any]], days_before: int, days_after: int, cutoff: datetime,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, list[Window]]]:
+    """Build fixed effective-date and symmetric transition windows.
+
+    Stored ends are inclusive event timestamps. Query ends are converted to
+    half-open boundaries by adding one second, matching BlockscoutClient.logs.
+    """
+    activity_rows: list[dict[str, str]] = []
+    transition_rows: list[dict[str, str]] = []
+    queries: dict[str, list[Window]] = {}
+    for update in updates:
+        ticker = str(update["ticker"])
+        emission = datetime.fromtimestamp(int(update["emission_timestamp"]), timezone.utc)
+        effective = datetime.fromtimestamp(int(update["effective_timestamp"]), timezone.utc)
+        if effective < emission:
+            raise ServiceError(f"{ticker}: multiplier update is effective before it was emitted: {update['id']}")
+
+        activity_start = effective - timedelta(days=days_before)
+        activity_end = effective + timedelta(days=days_after)
+        transition_start = emission
+        transition_end = effective + (effective - emission)
+        activity_rows.append({
+            "update_id": str(update["id"]), "ticker": ticker,
+            "start": activity_start.isoformat(), "end": activity_end.isoformat(),
+        })
+        transition_rows.append({
+            "update_id": str(update["id"]), "ticker": ticker,
+            "start": transition_start.isoformat(), "end": transition_end.isoformat(),
+        })
+        for start, inclusive_end in (
+            (activity_start, activity_end),
+            (transition_start, transition_end),
+        ):
+            fetch_end = min(inclusive_end + timedelta(seconds=1), cutoff)
+            if start < fetch_end:
+                queries.setdefault(ticker, []).append((start, fetch_end))
+    return (
+        activity_rows,
+        transition_rows,
+        {ticker: _merge_windows(windows) for ticker, windows in queries.items()},
+    )
 
 
 def _iter_assets(body: Any) -> Iterator[dict[str, Any]]:
@@ -89,10 +184,22 @@ def _fetch_alpha(
     payload = store.cached("alpha_vantage", cache_params, "csv")
     cache_hit = payload is not None
     if not cache_hit:
-        if before_request is not None:
-            before_request()
-        response = http.get(settings.alpha_vantage_url, params)
-        payload = response.content
+        retries = int(getattr(settings, "retries", 0))
+        for attempt in range(retries + 1):
+            if before_request is not None:
+                before_request()
+            response = http.get(settings.alpha_vantage_url, params)
+            payload = response.content
+            text = payload.decode("utf-8-sig")
+            reader = csv.DictReader(io.StringIO(text))
+            required = {"ex_dividend_date", "declaration_date", "record_date", "payment_date", "amount"}
+            if not text.lstrip().startswith("{") and required.issubset(reader.fieldnames or []):
+                break
+            if attempt == retries:
+                raise ServiceError(
+                    f"Alpha Vantage returned an invalid response for {symbol} "
+                    f"after {retries + 1} attempts: {text[:300]}"
+                )
     text = payload.decode("utf-8-sig")
     if text.lstrip().startswith("{"):
         raise ServiceError(f"Alpha Vantage returned an error for {symbol}: {text[:300]}")
@@ -153,6 +260,33 @@ def _timestamp_logs(web3: Web3, logs: list[dict[str, Any]], retries: int) -> Non
         log["timeStamp"] = hex(timestamps[block_number])
 
 
+def _mint_burn_logs(
+    blockscout: BlockscoutClient,
+    chain_id: int,
+    token_address: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    transfer_topic = event_topic(ROBINHOOD_STOCK.events.Transfer)
+    found: dict[str, dict[str, Any]] = {}
+    for indexed_address in ("topic1", "topic2"):
+        topics = {"topic0": transfer_topic, indexed_address: ZERO_ADDRESS_TOPIC}
+        for item in blockscout.logs(token_address, topics, start, end):
+            found[log_id(chain_id, item)] = item
+    return sorted(
+        found.values(),
+        key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+    )
+
+
+def _swap_topics(pool_type: str, pool_ref: str) -> dict[str, str]:
+    swap_interface = UNISWAP_V3_POOL if pool_type == "v3" else UNISWAP_V4_POOL_MANAGER
+    topics = {"topic0": event_topic(swap_interface.events.Swap)}
+    if pool_type == "v4":
+        topics["topic1"] = pool_ref
+    return topics
+
+
 def _pool_metadata(
     settings: Settings, web3: Web3, blockscout: BlockscoutClient,
     ticker: str, pool_type: str, pool_ref: str, stock_token: str, end: datetime,
@@ -203,19 +337,10 @@ def collect(settings: Settings) -> Path:
         dividends.extend(_fetch_alpha(settings, http, store, ticker.symbol, alpha_pacer.wait))
     _, tokens = _fetch_assets(settings, http, store)
 
-    dates = [date.fromisoformat(row["ex_dividend_date"]) for row in dividends]
-    payment_dates = []
-    for row in dividends:
-        try:
-            payment_dates.append(date.fromisoformat(row.get("payment_date", "")))
-        except ValueError:
-            pass
-    relevant = dates + payment_dates
-    scan_start_date = (min(relevant) if relevant else settings.ex_date_start) - timedelta(days=settings.days_before_ex_date)
-    scan_end_date = (max(relevant) if relevant else settings.ex_date_end) + timedelta(days=settings.days_after_effective + 1)
-    scan_start = _midnight(scan_start_date)
-    requested_scan_end = _midnight(scan_end_date)
-    scan_end = min(requested_scan_end, datetime.now(timezone.utc) + timedelta(seconds=1))
+    collection_cutoff = datetime.now(timezone.utc) + timedelta(seconds=1)
+    multiplier_scan_windows, multiplier_queries = _dividend_scan_windows(
+        dividends, settings.dividend_scan_padding_days, collection_cutoff,
+    )
 
     updates: list[dict[str, Any]] = []
     token_rows: list[dict[str, Any]] = []
@@ -229,7 +354,14 @@ def collect(settings: Settings) -> Path:
             "asset_id": token["asset"].get("id", ""), "current_multiplier": token["asset"].get("currentMultiplier", ""),
         })
         multiplier_topic = event_topic(ROBINHOOD_STOCK.events.UIMultiplierUpdated)
-        logs = blockscout.logs(token_address, {"topic0": multiplier_topic}, scan_start, scan_end)
+        found_logs: dict[str, dict[str, Any]] = {}
+        for scan_start, scan_end in multiplier_queries.get(ticker.symbol, []):
+            for log in blockscout.logs(token_address, {"topic0": multiplier_topic}, scan_start, scan_end):
+                found_logs[log_id(settings.chain_id, log)] = log
+        logs = sorted(
+            found_logs.values(),
+            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+        )
         _timestamp_logs(web3, logs, settings.retries)
         for log in logs:
             row = decode_multiplier(log, settings.chain_id, ticker.symbol)
@@ -252,16 +384,9 @@ def collect(settings: Settings) -> Path:
                 row["snapshot_status"] = "future_effective_time"
             updates.append(row)
 
-    if updates:
-        activity_start = min(scan_start, min(datetime.fromtimestamp(row["emission_timestamp"], timezone.utc) for row in updates))
-        ends = []
-        for row in updates:
-            emission = datetime.fromtimestamp(row["emission_timestamp"], timezone.utc)
-            effective = datetime.fromtimestamp(row["effective_timestamp"], timezone.utc)
-            ends.append(max(effective + timedelta(days=settings.days_after_effective), effective + (effective - emission)))
-        activity_end = min(max(scan_end, max(ends) + timedelta(seconds=1)), datetime.now(timezone.utc) + timedelta(seconds=1))
-    else:
-        activity_start, activity_end = scan_start, scan_end
+    activity_windows, transition_windows, activity_queries = _event_activity_windows(
+        updates, settings.days_before_effective, settings.days_after_effective, collection_cutoff,
+    )
 
     pools: list[dict[str, Any]] = []
     transfer_logs: list[dict[str, Any]] = []
@@ -269,24 +394,36 @@ def collect(settings: Settings) -> Path:
     for ticker in settings.tickers:
         token_row = next(row for row in token_rows if row["ticker"] == ticker.symbol)
         pool = _pool_metadata(settings, web3, blockscout, ticker.symbol, ticker.pool.type, ticker.pool.address,
-                              token_row["token_address"], scan_end)
+                              token_row["token_address"], collection_cutoff)
         pools.append(pool)
-        transfer_topic = event_topic(ROBINHOOD_STOCK.events.Transfer)
-        transfers = blockscout.logs(token_row["token_address"], {"topic0": transfer_topic}, activity_start, activity_end)
+        found_transfers: dict[str, dict[str, Any]] = {}
+        topics = _swap_topics(ticker.pool.type, ticker.pool.address)
+        found_swaps: dict[str, dict[str, Any]] = {}
+        for activity_start, activity_end in activity_queries.get(ticker.symbol, []):
+            for item in _mint_burn_logs(
+                blockscout, settings.chain_id, token_row["token_address"], activity_start, activity_end,
+            ):
+                found_transfers[log_id(settings.chain_id, item)] = item
+            for item in blockscout.logs(pool["swap_emitter"], topics, activity_start, activity_end):
+                found_swaps[log_id(settings.chain_id, item)] = item
+        transfers = sorted(
+            found_transfers.values(),
+            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+        )
+        swaps = sorted(
+            found_swaps.values(),
+            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+        )
         _timestamp_logs(web3, transfers, settings.retries)
-        transfer_logs.extend({"ticker": ticker.symbol, "log": item} for item in transfers)
-        swap_interface = UNISWAP_V3_POOL if ticker.pool.type == "v3" else UNISWAP_V4_POOL_MANAGER
-        topics = {"topic0": event_topic(swap_interface.events.Swap)}
-        if ticker.pool.type == "v4":
-            topics["topic1"] = ticker.pool.address
-        swaps = blockscout.logs(pool["swap_emitter"], topics, activity_start, activity_end)
         _timestamp_logs(web3, swaps, settings.retries)
+        transfer_logs.extend({"ticker": ticker.symbol, "log": item} for item in transfers)
         swap_logs.extend({"ticker": ticker.symbol, "log": item} for item in swaps)
 
     collection = {
-        "schema_version": 1, "chain_id": settings.chain_id,
-        "scan_start": scan_start.isoformat(), "scan_end": scan_end.isoformat(),
-        "activity_start": activity_start.isoformat(), "activity_end": activity_end.isoformat(),
+        "schema_version": 2, "chain_id": settings.chain_id,
+        "collection_cutoff": collection_cutoff.isoformat(),
+        "multiplier_scan_windows": multiplier_scan_windows,
+        "activity_windows": activity_windows, "transition_windows": transition_windows,
         "dividends": dividends, "tokens": token_rows, "pools": pools, "multiplier_updates": updates,
         "transfer_logs": transfer_logs, "swap_logs": swap_logs,
     }
@@ -294,8 +431,8 @@ def collect(settings: Settings) -> Path:
     atomic_json(path, collection)
     store.record_run(started_at, {
         "collection_path": str(path.relative_to(settings.raw_dir)),
-        "scan_start": scan_start.isoformat(), "scan_end": scan_end.isoformat(),
-        "activity_start": activity_start.isoformat(), "activity_end": activity_end.isoformat(),
         "dividend_count": len(dividends), "multiplier_update_count": len(updates),
+        "multiplier_scan_window_count": len(multiplier_scan_windows),
+        "activity_window_count": len(activity_windows),
     })
     return path

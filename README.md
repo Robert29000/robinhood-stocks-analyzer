@@ -29,6 +29,8 @@ The actions run sequentially in one CLI invocation: collection must finish succe
 
 Uncached Alpha Vantage requests are spaced by `services.alpha_vantage_request_delay` seconds (12 seconds by default). Cached dividend responses are used immediately without waiting.
 
+Collection uses three distinct UTC windows. Each dividend searches for multiplier updates from `ex_dividend_date - window.dividend_scan_padding_days` through the full day at `payment_date + window.dividend_scan_padding_days`. General mint/burn and swap outputs use `window.days_before_effective` and `window.days_after_effective` around each multiplier's effective timestamp. Transition outputs use the symmetric interval from event emission through `effective + (effective - emitted)`. Overlapping windows are merged per ticker before Blockscout requests, and each merged request is still split into daily chunks.
+
 The CLI automatically loads `.env` beside the selected configuration file. The RPC endpoint is read from `ROBINHOOD_RPC_URL` and is not stored in the TOML configuration snapshot. Blockscout requests use the unified Pro endpoint `https://api.blockscout.com/v2/api` with `chainid=4663` and the API key supplied as `apikey`.
 
 `process` atomically writes these files below `output`:
