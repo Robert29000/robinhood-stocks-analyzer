@@ -70,48 +70,42 @@ The start and end dates are inclusive.
 
 ### Collection windows
 
-The collector uses three separate windows.
+The collector uses two ranges.
 
-1. The multiplier scan window applies to each dividend.
+1. The dividend scan range applies to each dividend.
 
    ```text
    start = ex-dividend date - dividend_scan_padding_days
    end   = payment date + dividend_scan_padding_days
    ```
 
-   The collector includes the complete end date. It searches this window for `UIMultiplierUpdated` events.
+   The collector includes the complete end date. It searches this range for
+   `UIMultiplierUpdated`, mint, and burn events.
 
-2. The general activity window applies to each multiplier update.
-
-   ```text
-   start = effective time - days_before_effective
-   end   = effective time + days_after_effective
-   ```
-
-   General mint, burn, and swap CSV files use this window.
-
-3. The transition window applies to each multiplier update.
+2. The swap range applies to each multiplier update.
 
    ```text
    difference = effective time - emission time
-   start      = emission time
-   end        = effective time + difference
+   start      = emission time - difference
+   end        = effective time + (2 * difference)
    ```
 
-   Transition CSV files use this symmetric window.
+   The main swap CSV files use this full range. The transition CSV keeps the
+   emission-to-post-effective subset for focused comparison.
 
 Configure the window sizes in `config.toml`:
 
 ```toml
 [window]
 dividend_scan_padding_days = 7
-days_before_effective = 7
-days_after_effective = 7
 ```
 
-The collector merges overlapping windows for each ticker. This merge prevents duplicate requests.
+The collector merges overlapping ranges for each ticker. This merge prevents duplicate requests.
 
-Blockscout requests remain separated into daily UTC intervals. The collector removes duplicate logs after collection.
+Multiplier, mint, and burn requests start with the complete merged range.
+Blockscout ranges that reach the 1,000-log response limit are divided by block
+until each response is below the limit. Swap requests use daily UTC chunks and
+the same limit-based splitting. The collector removes duplicate logs after collection.
 
 ### Services
 
@@ -186,12 +180,12 @@ The processor writes CSV files to the configured output directory.
 | `tokens.csv` | Stock-token addresses, decimals, and asset metadata |
 | `pools.csv` | Pool addresses, currencies, fees, and decimals |
 | `multiplier_updates.csv` | Decoded multiplier updates and nearest dividend dates |
-| `mint_burn_events.csv` | Mint and burn events in general activity windows |
+| `mint_burn_events.csv` | Mint and burn events in dividend scan ranges |
 | `mint_burn_daily.csv` | Daily mint, burn, and net issuance totals |
 | `mint_burn_transitions.csv` | Mint and burn events from emission until effectiveness |
-| `swaps.csv` | Decoded swaps in general activity windows |
+| `swaps.csv` | Decoded swaps in the full multiplier-update swap ranges |
 | `swaps_daily.csv` | Daily swap counts and amounts |
-| `swap_transitions.csv` | Swaps in symmetric transition windows |
+| `swap_transitions.csv` | Swaps from emission through the mirrored post-effective period |
 
 The processor writes each file atomically.
 

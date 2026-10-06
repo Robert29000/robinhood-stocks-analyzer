@@ -10,12 +10,12 @@ from stock_activity.collect import (
     ZERO_ADDRESS_TOPIC,
     RequestPacer,
     _dividend_scan_windows,
-    _event_activity_windows,
     _fetch_alpha,
     _load_checkpoint,
     _merge_windows,
     _mint_burn_logs,
     _save_checkpoint,
+    _swap_windows,
     _swap_topics,
 )
 from stock_activity.contracts import ROBINHOOD_STOCK, UNISWAP_V3_POOL, UNISWAP_V4_POOL_MANAGER, event_topic
@@ -142,7 +142,7 @@ def test_mint_and_burn_logs_use_separate_indexed_address_filters_and_deduplicate
         def __init__(self):
             self.calls = []
 
-        def logs(self, address, topics, range_start, range_end):
+        def logs_full_range(self, address, topics, range_start, range_end):
             self.calls.append((address, topics, range_start, range_end))
             return [mint, zero_to_zero] if "topic1" in topics else [zero_to_zero, burn]
 
@@ -193,7 +193,7 @@ def test_dividend_scan_windows_are_per_event_and_merged_per_ticker():
     )]
 
 
-def test_event_windows_keep_fixed_activity_and_symmetric_transition_ranges():
+def test_swap_windows_cover_before_emission_through_twice_the_difference_after_effective():
     emission = int(datetime(2026, 8, 8, 12, tzinfo=timezone.utc).timestamp())
     effective = int(datetime(2026, 8, 10, 12, tzinfo=timezone.utc).timestamp())
     updates = [{
@@ -202,19 +202,18 @@ def test_event_windows_keep_fixed_activity_and_symmetric_transition_ranges():
     }]
     cutoff = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
-    activity, transitions, queries = _event_activity_windows(updates, 1, 3, cutoff)
+    rows, queries = _swap_windows(updates, cutoff)
 
-    assert activity == [{
+    assert rows == [{
         "update_id": "update-1", "ticker": "AAPL",
-        "start": "2026-08-09T12:00:00+00:00", "end": "2026-08-13T12:00:00+00:00",
-    }]
-    assert transitions == [{
-        "update_id": "update-1", "ticker": "AAPL",
-        "start": "2026-08-08T12:00:00+00:00", "end": "2026-08-12T12:00:00+00:00",
+        "start": "2026-08-06T12:00:00+00:00",
+        "emission": "2026-08-08T12:00:00+00:00",
+        "effective": "2026-08-10T12:00:00+00:00",
+        "end": "2026-08-14T12:00:00+00:00",
     }]
     assert queries["AAPL"] == [(
-        datetime(2026, 8, 8, 12, tzinfo=timezone.utc),
-        datetime(2026, 8, 13, 12, 0, 1, tzinfo=timezone.utc),
+        datetime(2026, 8, 6, 12, tzinfo=timezone.utc),
+        datetime(2026, 8, 14, 12, 0, 1, tzinfo=timezone.utc),
     )]
 
 

@@ -138,6 +138,29 @@ class BlockscoutClient(HttpService):
             cursor = boundary
         return sorted(found.values(), key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))))
 
+    def logs_full_range(
+        self, address: str, topics: dict[str, str], start: datetime, end: datetime,
+    ) -> list[dict[str, Any]]:
+        """Fetch [start, end) in one request, splitting only at the result cap."""
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("log boundaries must be timezone-aware")
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if start >= end:
+            return []
+        first = self.block_at(int(start.timestamp()), "after")
+        last = self.block_at(int(end.timestamp()) - 1, "before")
+        if first > last:
+            return []
+        found = {
+            log_id(self.chain_id, item): item
+            for item in self._logs_range(address.lower(), topics, first, last)
+        }
+        return sorted(
+            found.values(),
+            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+        )
+
     def logs_blocks(self, address: str, topics: dict[str, str], start: int, end: int) -> list[dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
         for item in self._logs_range(address, topics, start, end):

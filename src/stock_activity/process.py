@@ -101,25 +101,6 @@ def daily_swaps(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [grouped[key] for key in sorted(grouped)]
 
 
-def activity_events(
-    events: list[dict[str, Any]], windows: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Keep general activity inside fixed windows around multiplier effectiveness."""
-    if windows is None:  # Backward compatibility with schema-1 collections.
-        return events
-    by_ticker: dict[str, list[tuple[int, int]]] = {}
-    for window in windows:
-        start = int(datetime.fromisoformat(window["start"]).timestamp())
-        end = int(datetime.fromisoformat(window["end"]).timestamp())
-        by_ticker.setdefault(window["ticker"], []).append((start, end))
-    kept = []
-    for event in events:
-        timestamp = int(datetime.fromisoformat(event["timestamp"]).timestamp())
-        if any(start <= timestamp <= end for start, end in by_ticker.get(event["ticker"], [])):
-            kept.append(event)
-    return kept
-
-
 def transition_rows(
     updates: list[dict[str, Any]], transfers: list[dict[str, Any]], swaps: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -169,8 +150,6 @@ def process(settings: Settings) -> list[Path]:
         ))
     transfers.sort(key=lambda row: (row["ticker"], row["block_number"], row["log_index"]))
     swaps.sort(key=lambda row: (row["ticker"], row["block_number"], row["log_index"]))
-    activity_transfers = activity_events(transfers, data.get("activity_windows"))
-    activity_swaps = activity_events(swaps, data.get("activity_windows"))
     updates = []
     for update in data["multiplier_updates"]:
         updates.append({**update, **associate_dividend(update, data["dividends"])})
@@ -179,10 +158,10 @@ def process(settings: Settings) -> list[Path]:
     outputs: list[tuple[str, list[dict[str, Any]], list[str]]] = [
         ("dividends.csv", data["dividends"], DIVIDEND_FIELDS), ("tokens.csv", data["tokens"], TOKEN_FIELDS),
         ("pools.csv", data["pools"], POOL_FIELDS), ("multiplier_updates.csv", updates, UPDATE_FIELDS),
-        ("mint_burn_events.csv", activity_transfers, TRANSFER_FIELDS),
-        ("mint_burn_daily.csv", daily_transfers(activity_transfers), TRANSFER_DAILY_FIELDS),
-        ("swaps.csv", activity_swaps, SWAP_FIELDS),
-        ("swaps_daily.csv", daily_swaps(activity_swaps), SWAP_DAILY_FIELDS),
+        ("mint_burn_events.csv", transfers, TRANSFER_FIELDS),
+        ("mint_burn_daily.csv", daily_transfers(transfers), TRANSFER_DAILY_FIELDS),
+        ("swaps.csv", swaps, SWAP_FIELDS),
+        ("swaps_daily.csv", daily_swaps(swaps), SWAP_DAILY_FIELDS),
         ("mint_burn_transitions.csv", mint_transitions, ["update_id", "segment", *TRANSFER_FIELDS]),
         ("swap_transitions.csv", swap_transitions, ["update_id", "segment", "window_start", "window_effective", "window_end", *SWAP_FIELDS]),
     ]

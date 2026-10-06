@@ -8,7 +8,7 @@ from eth_abi import encode
 
 from stock_activity.contracts import ROBINHOOD_STOCK, UNISWAP_V3_POOL, UNISWAP_V4_POOL_MANAGER, event_topic
 from stock_activity.decoders import decode_multiplier, decode_swap, decode_transfer, decode_v4_initialize
-from stock_activity.process import activity_events, associate_dividend, daily_transfers, transition_rows
+from stock_activity.process import associate_dividend, daily_transfers, transition_rows
 
 
 MULTIPLIER_TOPIC = event_topic(ROBINHOOD_STOCK.events.UIMultiplierUpdated)
@@ -138,18 +138,3 @@ def test_transition_boundary_inclusion():
     mint_rows, swap_rows = transition_rows([update], transfers, swaps)
     assert [row["id"] for row in mint_rows] == ["at-start", "before"]
     assert [row["segment"] for row in swap_rows] == ["pre_effective", "post_effective", "post_effective"]
-
-
-def test_general_activity_uses_fixed_effective_window():
-    events = [
-        {"ticker": "AAPL", "id": "before", "timestamp": "2026-08-09T11:59:59+00:00"},
-        {"ticker": "AAPL", "id": "start", "timestamp": "2026-08-09T12:00:00+00:00"},
-        {"ticker": "AAPL", "id": "end", "timestamp": "2026-08-13T12:00:00+00:00"},
-        {"ticker": "AAPL", "id": "after", "timestamp": "2026-08-13T12:00:01+00:00"},
-        {"ticker": "MSFT", "id": "other", "timestamp": "2026-08-10T12:00:00+00:00"},
-    ]
-    windows = [{
-        "ticker": "AAPL", "start": "2026-08-09T12:00:00+00:00", "end": "2026-08-13T12:00:00+00:00",
-    }]
-
-    assert [row["id"] for row in activity_events(events, windows)] == ["start", "end"]

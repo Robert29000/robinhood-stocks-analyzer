@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from stock_activity.clients import BlockscoutClient, ServiceError
@@ -83,3 +85,25 @@ def test_single_block_limit_fails_explicitly():
     client = client_with(lambda params: {"status": "0", "message": "Query returned more than 1000 results", "result": []})
     with pytest.raises(ServiceError, match="one block"):
         client._logs_range("0x1", {}, 7, 7)
+
+
+def test_full_range_logs_use_one_block_range_request():
+    client = object.__new__(BlockscoutClient)
+    client.chain_id = 4663
+    block_calls = []
+    range_calls = []
+    client.block_at = lambda timestamp, closest: block_calls.append((timestamp, closest)) or (
+        10 if closest == "after" else 20
+    )
+    client._logs_range = lambda address, topics, start, end: (
+        range_calls.append((address, topics, start, end)) or [make_log(12)]
+    )
+    start = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    end = datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+    assert client.logs_full_range("0xABC", {"topic0": "0xtopic"}, start, end) == [make_log(12)]
+    assert block_calls == [
+        (int(start.timestamp()), "after"),
+        (int(end.timestamp()) - 1, "before"),
+    ]
+    assert range_calls == [("0xabc", {"topic0": "0xtopic"}, 10, 20)]

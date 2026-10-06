@@ -16,8 +16,6 @@ def test_checked_in_config_has_requested_pools(monkeypatch):
     assert settings.ex_date_start.isoformat() == "2026-07-01"
     assert settings.ex_date_end.isoformat() == "2026-09-30"
     assert settings.dividend_scan_padding_days == 7
-    assert settings.days_before_effective == 7
-    assert settings.days_after_effective == 7
 
 
 def test_invalid_pool_metadata_is_rejected(tmp_path, monkeypatch):

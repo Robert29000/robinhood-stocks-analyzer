@@ -133,16 +133,11 @@ def _dividend_scan_windows(
     return rows, {ticker: _merge_windows(windows) for ticker, windows in by_ticker.items()}
 
 
-def _event_activity_windows(
-    updates: list[dict[str, Any]], days_before: int, days_after: int, cutoff: datetime,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, list[Window]]]:
-    """Build fixed effective-date and symmetric transition windows.
-
-    Stored ends are inclusive event timestamps. Query ends are converted to
-    half-open boundaries by adding one second, matching BlockscoutClient.logs.
-    """
-    activity_rows: list[dict[str, str]] = []
-    transition_rows: list[dict[str, str]] = []
+def _swap_windows(
+    updates: list[dict[str, Any]], cutoff: datetime,
+) -> tuple[list[dict[str, str]], dict[str, list[Window]]]:
+    """Build the full swap-analysis range around each multiplier update."""
+    rows: list[dict[str, str]] = []
     queries: dict[str, list[Window]] = {}
     for update in updates:
         ticker = str(update["ticker"])
@@ -150,31 +145,18 @@ def _event_activity_windows(
         effective = datetime.fromtimestamp(int(update["effective_timestamp"]), timezone.utc)
         if effective < emission:
             raise ServiceError(f"{ticker}: multiplier update is effective before it was emitted: {update['id']}")
-
-        activity_start = effective - timedelta(days=days_before)
-        activity_end = effective + timedelta(days=days_after)
-        transition_start = emission
-        transition_end = effective + (effective - emission)
-        activity_rows.append({
+        difference = effective - emission
+        start = emission - difference
+        end = effective + difference * 2
+        rows.append({
             "update_id": str(update["id"]), "ticker": ticker,
-            "start": activity_start.isoformat(), "end": activity_end.isoformat(),
+            "start": start.isoformat(), "emission": emission.isoformat(),
+            "effective": effective.isoformat(), "end": end.isoformat(),
         })
-        transition_rows.append({
-            "update_id": str(update["id"]), "ticker": ticker,
-            "start": transition_start.isoformat(), "end": transition_end.isoformat(),
-        })
-        for start, inclusive_end in (
-            (activity_start, activity_end),
-            (transition_start, transition_end),
-        ):
-            fetch_end = min(inclusive_end + timedelta(seconds=1), cutoff)
-            if start < fetch_end:
-                queries.setdefault(ticker, []).append((start, fetch_end))
-    return (
-        activity_rows,
-        transition_rows,
-        {ticker: _merge_windows(windows) for ticker, windows in queries.items()},
-    )
+        fetch_end = min(end + timedelta(seconds=1), cutoff)
+        if start < fetch_end:
+            queries.setdefault(ticker, []).append((start, fetch_end))
+    return rows, {ticker: _merge_windows(windows) for ticker, windows in queries.items()}
 
 
 def _iter_assets(body: Any) -> Iterator[dict[str, Any]]:
@@ -326,7 +308,7 @@ def _mint_burn_logs(
     found: dict[str, dict[str, Any]] = {}
     for indexed_address in ("topic1", "topic2"):
         topics = {"topic0": transfer_topic, indexed_address: ZERO_ADDRESS_TOPIC}
-        for item in blockscout.logs(token_address, topics, start, end):
+        for item in blockscout.logs_full_range(token_address, topics, start, end):
             found[log_id(chain_id, item)] = item
     return sorted(
         found.values(),
@@ -430,22 +412,36 @@ def collect(
     )
 
     updates: list[dict[str, Any]] = []
+    transfer_logs: list[dict[str, Any]] = []
     for index, ticker in enumerate(settings.tickers, 1):
-        report("Chain logs", f"multiplier updates for {ticker.symbol} ({index}/{len(settings.tickers)})")
+        report("Chain logs", f"multipliers and mint/burn for {ticker.symbol} ({index}/{len(settings.tickers)})")
         token_row = token_by_ticker[ticker.symbol]
         token_address = token_row["token_address"]
         token_contract = contract_interface(web3, "robinhood_stock_token", token_address)
         decimals = int(token_row["decimals"])
         multiplier_topic = event_topic(ROBINHOOD_STOCK.events.UIMultiplierUpdated)
         found_logs: dict[str, dict[str, Any]] = {}
+        found_transfers: dict[str, dict[str, Any]] = {}
         for scan_start, scan_end in multiplier_queries.get(ticker.symbol, []):
-            for log in blockscout.logs(token_address, {"topic0": multiplier_topic}, scan_start, scan_end):
+            for log in blockscout.logs_full_range(
+                token_address, {"topic0": multiplier_topic}, scan_start, scan_end,
+            ):
                 found_logs[log_id(settings.chain_id, log)] = log
+            for item in _mint_burn_logs(
+                blockscout, settings.chain_id, token_address, scan_start, scan_end,
+            ):
+                found_transfers[log_id(settings.chain_id, item)] = item
         logs = sorted(
             found_logs.values(),
             key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
         )
+        transfers = sorted(
+            found_transfers.values(),
+            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
+        )
         _timestamp_logs(web3, logs, settings.retries)
+        _timestamp_logs(web3, transfers, settings.retries)
+        transfer_logs.extend({"ticker": ticker.symbol, "log": item} for item in transfers)
         for log in logs:
             row = decode_multiplier(log, settings.chain_id, ticker.symbol)
             row["emission_timestamp"] = int(parse_log_timestamp(log).timestamp())
@@ -467,48 +463,34 @@ def collect(
                 row["snapshot_status"] = "future_effective_time"
             updates.append(row)
 
-    activity_windows, transition_windows, activity_queries = _event_activity_windows(
-        updates, settings.days_before_effective, settings.days_after_effective, collection_cutoff,
-    )
+    swap_windows, swap_queries = _swap_windows(updates, collection_cutoff)
 
     pools: list[dict[str, Any]] = []
-    transfer_logs: list[dict[str, Any]] = []
     swap_logs: list[dict[str, Any]] = []
     for index, ticker in enumerate(settings.tickers, 1):
-        report("Chain logs", f"activity for {ticker.symbol} ({index}/{len(settings.tickers)})")
+        report("Chain logs", f"swaps for {ticker.symbol} ({index}/{len(settings.tickers)})")
         token_row = token_by_ticker[ticker.symbol]
         pool = _pool_metadata(settings, web3, blockscout, ticker.symbol, ticker.pool.type, ticker.pool.address,
                               token_row["token_address"], collection_cutoff)
         pools.append(pool)
-        found_transfers: dict[str, dict[str, Any]] = {}
         topics = _swap_topics(ticker.pool.type, ticker.pool.address)
         found_swaps: dict[str, dict[str, Any]] = {}
-        for activity_start, activity_end in activity_queries.get(ticker.symbol, []):
-            for item in _mint_burn_logs(
-                blockscout, settings.chain_id, token_row["token_address"], activity_start, activity_end,
-            ):
-                found_transfers[log_id(settings.chain_id, item)] = item
-            for item in blockscout.logs(pool["swap_emitter"], topics, activity_start, activity_end):
+        for swap_start, swap_end in swap_queries.get(ticker.symbol, []):
+            for item in blockscout.logs(pool["swap_emitter"], topics, swap_start, swap_end):
                 found_swaps[log_id(settings.chain_id, item)] = item
-        transfers = sorted(
-            found_transfers.values(),
-            key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
-        )
         swaps = sorted(
             found_swaps.values(),
             key=lambda row: (hex_int(row.get("blockNumber", 0)), hex_int(row.get("logIndex", 0))),
         )
-        _timestamp_logs(web3, transfers, settings.retries)
         _timestamp_logs(web3, swaps, settings.retries)
-        transfer_logs.extend({"ticker": ticker.symbol, "log": item} for item in transfers)
         swap_logs.extend({"ticker": ticker.symbol, "log": item} for item in swaps)
 
     collection = {
-        "schema_version": 2, "chain_id": settings.chain_id,
+        "schema_version": 3, "chain_id": settings.chain_id,
         "resume_key": _resume_key(settings),
         "collection_cutoff": collection_cutoff.isoformat(),
         "multiplier_scan_windows": multiplier_scan_windows,
-        "activity_windows": activity_windows, "transition_windows": transition_windows,
+        "swap_windows": swap_windows,
         "dividends": dividends, "tokens": token_rows, "pools": pools, "multiplier_updates": updates,
         "transfer_logs": transfer_logs, "swap_logs": swap_logs,
     }
@@ -519,6 +501,6 @@ def collect(
         "collection_path": str(path.relative_to(settings.raw_dir)),
         "dividend_count": len(dividends), "multiplier_update_count": len(updates),
         "multiplier_scan_window_count": len(multiplier_scan_windows),
-        "activity_window_count": len(activity_windows),
+        "swap_window_count": len(swap_windows),
     })
     return path

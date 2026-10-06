@@ -34,8 +34,6 @@ class Settings:
     ex_date_start: date
     ex_date_end: date
     dividend_scan_padding_days: int
-    days_before_effective: int
-    days_after_effective: int
     raw_dir: Path
     output_dir: Path
     stablecoin_address: str
@@ -105,15 +103,8 @@ def load_config(path: str | Path) -> Settings:
     if alpha_vantage_request_delay < 0:
         raise ValueError("[services].alpha_vantage_request_delay must be non-negative")
     dividend_scan_padding_days = int(window.get("dividend_scan_padding_days", 7))
-    days_before_effective = int(window.get("days_before_effective", 7))
-    days_after_effective = int(window.get("days_after_effective", 7))
-    for key, value in (
-        ("dividend_scan_padding_days", dividend_scan_padding_days),
-        ("days_before_effective", days_before_effective),
-        ("days_after_effective", days_after_effective),
-    ):
-        if value < 0:
-            raise ValueError(f"[window].{key} must be non-negative")
+    if dividend_scan_padding_days < 0:
+        raise ValueError("[window].dividend_scan_padding_days must be non-negative")
     return Settings(
         config_path=config_path,
         chain_id=chain_id,
@@ -125,8 +116,6 @@ def load_config(path: str | Path) -> Settings:
         ex_date_start=start,
         ex_date_end=end,
         dividend_scan_padding_days=dividend_scan_padding_days,
-        days_before_effective=days_before_effective,
-        days_after_effective=days_after_effective,
         raw_dir=raw_dir,
         output_dir=output_dir,
         stablecoin_address=_address(str(chain.get("stablecoin_address", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168")), "stablecoin"),
