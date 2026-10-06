@@ -25,6 +25,61 @@ from .utils import hex_int, log_id, parse_log_timestamp
 
 ZERO_ADDRESS_TOPIC = "0x" + "0" * 64
 Window = tuple[datetime, datetime]
+Progress = Callable[[str, str], None]
+COLLECT_STEPS = ("alpha", "assets", "logs")
+
+
+def _resume_key(settings: Settings) -> dict[str, Any]:
+    return {
+        "chain_id": settings.chain_id,
+        "ex_date_start": settings.ex_date_start.isoformat(),
+        "ex_date_end": settings.ex_date_end.isoformat(),
+        "tickers": [
+            {"symbol": ticker.symbol, "pool_type": ticker.pool.type, "pool": ticker.pool.address}
+            for ticker in settings.tickers
+        ],
+    }
+
+
+def _save_checkpoint(
+    settings: Settings,
+    dividends: list[dict[str, Any]],
+    tokens: list[dict[str, Any]] | None = None,
+) -> None:
+    checkpoint: dict[str, Any] = {
+        "resume_key": _resume_key(settings),
+        "dividends": dividends,
+    }
+    if tokens is not None:
+        checkpoint["tokens"] = tokens
+    atomic_json(settings.raw_dir / "collection-checkpoint.json", checkpoint)
+
+
+def _load_checkpoint(settings: Settings, step: str) -> dict[str, Any]:
+    checkpoint_path = settings.raw_dir / "collection-checkpoint.json"
+    collection_path = settings.raw_dir / "collection.json"
+    path = checkpoint_path if checkpoint_path.exists() else collection_path
+    if not path.exists():
+        raise ServiceError(f"cannot start from {step}: no prior collection checkpoint exists")
+    try:
+        checkpoint = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ServiceError(f"cannot read collection checkpoint: {path}") from exc
+    if not isinstance(checkpoint, dict):
+        raise ServiceError(f"collection checkpoint is malformed: {path}")
+
+    saved_key = checkpoint.get("resume_key")
+    if saved_key is not None and saved_key != _resume_key(settings):
+        raise ServiceError("collection checkpoint does not match the current chain, window, or tickers")
+    if not isinstance(checkpoint.get("dividends"), list):
+        raise ServiceError("collection checkpoint does not contain Alpha Vantage dividends")
+    if step == "logs":
+        token_rows = checkpoint.get("tokens")
+        expected = {ticker.symbol for ticker in settings.tickers}
+        found = {row.get("ticker") for row in token_rows or [] if isinstance(row, dict)}
+        if not isinstance(token_rows, list) or found != expected:
+            raise ServiceError("collection checkpoint does not contain Robinhood assets for all tickers")
+    return checkpoint
 
 
 def _midnight(value: date) -> datetime:
@@ -319,9 +374,16 @@ def _pool_metadata(
     }
 
 
-def collect(settings: Settings) -> Path:
+def collect(
+    settings: Settings,
+    start_from: str = "alpha",
+    progress: Progress | None = None,
+) -> Path:
+    if start_from not in COLLECT_STEPS:
+        raise ValueError(f"unknown collection step: {start_from}")
     if not settings.blockscout_api_key:
         raise ServiceError("BLOCKSCOUT_API_KEY is required for the Blockscout Pro API")
+    report = progress or (lambda phase, detail: None)
     started_at = datetime.now(timezone.utc).isoformat()
     config_snapshot = tomllib.loads(settings.config_path.read_text(encoding="utf-8"))
     store = RawStore(settings.raw_dir, config_snapshot)
@@ -332,10 +394,35 @@ def collect(settings: Settings) -> Path:
         store, settings.request_timeout, settings.retries,
     )
     alpha_pacer = RequestPacer(settings.alpha_vantage_request_delay)
-    dividends: list[dict[str, Any]] = []
-    for ticker in settings.tickers:
-        dividends.extend(_fetch_alpha(settings, http, store, ticker.symbol, alpha_pacer.wait))
-    _, tokens = _fetch_assets(settings, http, store)
+    checkpoint = _load_checkpoint(settings, start_from) if start_from != "alpha" else None
+
+    if start_from == "alpha":
+        dividends: list[dict[str, Any]] = []
+        for index, ticker in enumerate(settings.tickers, 1):
+            report("Alpha Vantage", f"{ticker.symbol} ({index}/{len(settings.tickers)})")
+            dividends.extend(_fetch_alpha(settings, http, store, ticker.symbol, alpha_pacer.wait))
+        _save_checkpoint(settings, dividends)
+    else:
+        dividends = checkpoint["dividends"]
+
+    if start_from in {"alpha", "assets"}:
+        report("Robinhood assets", "fetching token metadata")
+        _, assets = _fetch_assets(settings, http, store)
+        token_rows: list[dict[str, Any]] = []
+        for ticker in settings.tickers:
+            token = assets[ticker.symbol]
+            token_address = token["token_address"]
+            token_contract = contract_interface(web3, "robinhood_stock_token", token_address)
+            decimals = int(_web3_call(token_contract.functions.decimals().call, settings.retries))
+            token_rows.append({
+                "ticker": ticker.symbol, "token_address": token_address, "decimals": decimals,
+                "asset_id": token["asset"].get("id", ""),
+                "current_multiplier": token["asset"].get("currentMultiplier", ""),
+            })
+        _save_checkpoint(settings, dividends, token_rows)
+    else:
+        token_rows = checkpoint["tokens"]
+    token_by_ticker = {row["ticker"]: row for row in token_rows}
 
     collection_cutoff = datetime.now(timezone.utc) + timedelta(seconds=1)
     multiplier_scan_windows, multiplier_queries = _dividend_scan_windows(
@@ -343,16 +430,12 @@ def collect(settings: Settings) -> Path:
     )
 
     updates: list[dict[str, Any]] = []
-    token_rows: list[dict[str, Any]] = []
-    for ticker in settings.tickers:
-        token = tokens[ticker.symbol]
-        token_address = token["token_address"]
+    for index, ticker in enumerate(settings.tickers, 1):
+        report("Chain logs", f"multiplier updates for {ticker.symbol} ({index}/{len(settings.tickers)})")
+        token_row = token_by_ticker[ticker.symbol]
+        token_address = token_row["token_address"]
         token_contract = contract_interface(web3, "robinhood_stock_token", token_address)
-        decimals = int(_web3_call(token_contract.functions.decimals().call, settings.retries))
-        token_rows.append({
-            "ticker": ticker.symbol, "token_address": token_address, "decimals": decimals,
-            "asset_id": token["asset"].get("id", ""), "current_multiplier": token["asset"].get("currentMultiplier", ""),
-        })
+        decimals = int(token_row["decimals"])
         multiplier_topic = event_topic(ROBINHOOD_STOCK.events.UIMultiplierUpdated)
         found_logs: dict[str, dict[str, Any]] = {}
         for scan_start, scan_end in multiplier_queries.get(ticker.symbol, []):
@@ -391,8 +474,9 @@ def collect(settings: Settings) -> Path:
     pools: list[dict[str, Any]] = []
     transfer_logs: list[dict[str, Any]] = []
     swap_logs: list[dict[str, Any]] = []
-    for ticker in settings.tickers:
-        token_row = next(row for row in token_rows if row["ticker"] == ticker.symbol)
+    for index, ticker in enumerate(settings.tickers, 1):
+        report("Chain logs", f"activity for {ticker.symbol} ({index}/{len(settings.tickers)})")
+        token_row = token_by_ticker[ticker.symbol]
         pool = _pool_metadata(settings, web3, blockscout, ticker.symbol, ticker.pool.type, ticker.pool.address,
                               token_row["token_address"], collection_cutoff)
         pools.append(pool)
@@ -421,6 +505,7 @@ def collect(settings: Settings) -> Path:
 
     collection = {
         "schema_version": 2, "chain_id": settings.chain_id,
+        "resume_key": _resume_key(settings),
         "collection_cutoff": collection_cutoff.isoformat(),
         "multiplier_scan_windows": multiplier_scan_windows,
         "activity_windows": activity_windows, "transition_windows": transition_windows,
@@ -428,6 +513,7 @@ def collect(settings: Settings) -> Path:
         "transfer_logs": transfer_logs, "swap_logs": swap_logs,
     }
     path = settings.raw_dir / "collection.json"
+    report("Saving", "collection.json")
     atomic_json(path, collection)
     store.record_run(started_at, {
         "collection_path": str(path.relative_to(settings.raw_dir)),

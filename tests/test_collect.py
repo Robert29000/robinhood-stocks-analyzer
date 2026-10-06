@@ -12,8 +12,10 @@ from stock_activity.collect import (
     _dividend_scan_windows,
     _event_activity_windows,
     _fetch_alpha,
+    _load_checkpoint,
     _merge_windows,
     _mint_burn_logs,
+    _save_checkpoint,
     _swap_topics,
 )
 from stock_activity.contracts import ROBINHOOD_STOCK, UNISWAP_V3_POOL, UNISWAP_V4_POOL_MANAGER, event_topic
@@ -219,3 +221,24 @@ def test_event_windows_keep_fixed_activity_and_symmetric_transition_ranges():
 def test_merge_windows_discards_empty_ranges():
     point = datetime(2026, 8, 1, tzinfo=timezone.utc)
     assert _merge_windows([(point, point)]) == []
+
+
+def test_collection_checkpoint_supports_assets_and_logs_start_points(tmp_path):
+    checkpoint_settings = SimpleNamespace(
+        raw_dir=tmp_path,
+        chain_id=4663,
+        ex_date_start=date(2026, 7, 1),
+        ex_date_end=date(2026, 9, 30),
+        tickers=(SimpleNamespace(
+            symbol="AAPL",
+            pool=SimpleNamespace(type="v3", address="0xpool"),
+        ),),
+    )
+    dividends = [{"ticker": "AAPL"}]
+    tokens = [{"ticker": "AAPL", "token_address": "0xtoken", "decimals": 18}]
+
+    _save_checkpoint(checkpoint_settings, dividends)
+    assert _load_checkpoint(checkpoint_settings, "assets")["dividends"] == dividends
+
+    _save_checkpoint(checkpoint_settings, dividends, tokens)
+    assert _load_checkpoint(checkpoint_settings, "logs")["tokens"] == tokens

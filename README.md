@@ -134,6 +134,19 @@ stock-activity collect --config config.toml
 stock-activity process --config config.toml
 ```
 
+Collection shows the current source and ticker on one terminal line. To resume
+from a completed phase after an interruption, select its next start point:
+
+```bash
+stock-activity collect --from assets --config config.toml
+stock-activity collect --from logs --config config.toml
+```
+
+The available start points are `alpha` (the default), `assets`, and `logs`.
+The `logs` step includes multiplier, mint/burn, and swap log collection. The
+collector saves `data/raw/collection-checkpoint.json` after the Alpha and asset
+phases. A checkpoint must match the current chain, date window, and tickers.
+
 The `process` action requires a complete `data/raw/collection.json` file.
 
 ## Data collection
