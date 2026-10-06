@@ -20,9 +20,10 @@ cp .env.example .env
 The checked-in [config.toml](config.toml) includes the seven requested highest-TVL USDG pools and official Robinhood Chain defaults. Pool discovery is intentionally out of scope.
 
 ```bash
-stock-activity collect --config config.toml
-stock-activity process --config config.toml
+stock-activity collect process --config config.toml
 ```
+
+The actions run sequentially in one CLI invocation: collection must finish successfully before processing starts. Either action can still be run independently by specifying only `collect` or only `process`.
 
 `collect` is resumable: request identities are stable, original Alpha Vantage CSV, Robinhood JSON, and every Blockscout response are retained below `data/raw`, and `manifest.json` records parameters, collection time, the configuration snapshot, and SHA-256 checksums. Contract reads need an archive-capable RPC to snapshot `totalSupplyUI()` at the last block strictly before multiplier effectiveness.
 
