@@ -1,53 +1,235 @@
 # Robinhood Stock Dividend Activity Analyzer
 
-This project collects dividend declarations and Robinhood Chain activity, then produces analysis-ready CSV files correlating stock-token multiplier changes, issuance/redemption, and swaps in fixed Uniswap USDG pools. All application timestamps and date boundaries are UTC. Yahoo Finance is deliberately isolated to the notebook.
+This project links stock dividend dates to activity on Robinhood Chain. It analyzes these records:
 
-Onchain data is decoded by Web3.py from vendored public contract ABIs—there is no hand-written event byte parsing.
+- Stock-token multiplier updates
+- Token mint and burn events
+- Swaps in configured Uniswap V3 and V4 USDG pools
 
-## Setup
+The collector stores source responses before it processes them. The processor creates CSV files for analysis.
 
-Python 3.11 or newer is required.
+All dates and timestamps use UTC.
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[test,notebook]'
-cp .env.example .env
-# Fill in ROBINHOOD_RPC_URL, ALPHAVANTAGE_API_KEY, and BLOCKSCOUT_API_KEY in .env.
-# ROBINHOOD_RPC_URL should use an archive-capable endpoint for reliable historical snapshots.
+## Requirements
+
+- Python 3.11 or a later version
+- An Alpha Vantage API key
+- A Blockscout Pro API key
+- An archive-capable Robinhood Chain RPC endpoint
+
+The archive RPC must support historical contract calls. The collector uses these calls for pre-effective supply snapshots.
+
+## Installation
+
+1. Create and activate a virtual environment.
+
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   ```
+
+2. Install the package and the optional development dependencies.
+
+   ```bash
+   pip install -e '.[test,notebook]'
+   ```
+
+3. Create the environment file.
+
+   ```bash
+   cp .env.example .env
+   ```
+
+4. Add these values to `.env`:
+
+   ```dotenv
+   ROBINHOOD_RPC_URL=
+   ALPHAVANTAGE_API_KEY=
+   BLOCKSCOUT_API_KEY=
+   ```
+
+The CLI reads `.env` from the directory that contains the selected configuration file.
+
+## Configuration
+
+Edit `config.toml` before collection.
+
+The checked-in configuration contains seven stock symbols and their USDG pools. The application does not discover pools.
+
+### Date filter
+
+These fields select Alpha Vantage dividend rows by ex-dividend date:
+
+```toml
+[window]
+ex_date_start = "2026-07-01"
+ex_date_end = "2026-09-30"
 ```
 
-The checked-in [config.toml](config.toml) includes the seven requested highest-TVL USDG pools and official Robinhood Chain defaults. Pool discovery is intentionally out of scope.
+The start and end dates are inclusive.
+
+### Collection windows
+
+The collector uses three separate windows.
+
+1. The multiplier scan window applies to each dividend.
+
+   ```text
+   start = ex-dividend date - dividend_scan_padding_days
+   end   = payment date + dividend_scan_padding_days
+   ```
+
+   The collector includes the complete end date. It searches this window for `UIMultiplierUpdated` events.
+
+2. The general activity window applies to each multiplier update.
+
+   ```text
+   start = effective time - days_before_effective
+   end   = effective time + days_after_effective
+   ```
+
+   General mint, burn, and swap CSV files use this window.
+
+3. The transition window applies to each multiplier update.
+
+   ```text
+   difference = effective time - emission time
+   start      = emission time
+   end        = effective time + difference
+   ```
+
+   Transition CSV files use this symmetric window.
+
+Configure the window sizes in `config.toml`:
+
+```toml
+[window]
+dividend_scan_padding_days = 7
+days_before_effective = 7
+days_after_effective = 7
+```
+
+The collector merges overlapping windows for each ticker. This merge prevents duplicate requests.
+
+Blockscout requests remain separated into daily UTC intervals. The collector removes duplicate logs after collection.
+
+### Services
+
+The `[services]` section controls service URLs, timeouts, retries, and Alpha Vantage request spacing.
+
+The collector waits only before an uncached Alpha Vantage request. It does not wait before it reads a cached response.
+
+## Run the application
+
+Run collection and processing in one command:
 
 ```bash
 stock-activity collect process --config config.toml
 ```
 
-The actions run sequentially in one CLI invocation: collection must finish successfully before processing starts. Either action can still be run independently by specifying only `collect` or only `process`.
+The CLI completes collection before it starts processing. You can also run one action:
 
-`collect` is resumable: request identities are stable, original Alpha Vantage CSV, Robinhood JSON, and every Blockscout response are retained below `data/raw`, and `manifest.json` records parameters, collection time, the configuration snapshot, and SHA-256 checksums. Contract reads need an archive-capable RPC to snapshot `totalSupplyUI()` at the last block strictly before multiplier effectiveness.
+```bash
+stock-activity collect --config config.toml
+stock-activity process --config config.toml
+```
 
-Uncached Alpha Vantage requests are spaced by `services.alpha_vantage_request_delay` seconds (12 seconds by default). Cached dividend responses are used immediately without waiting.
+The `process` action requires a complete `data/raw/collection.json` file.
 
-Collection uses three distinct UTC windows. Each dividend searches for multiplier updates from `ex_dividend_date - window.dividend_scan_padding_days` through the full day at `payment_date + window.dividend_scan_padding_days`. General mint/burn and swap outputs use `window.days_before_effective` and `window.days_after_effective` around each multiplier's effective timestamp. Transition outputs use the symmetric interval from event emission through `effective + (effective - emitted)`. Overlapping windows are merged per ticker before Blockscout requests, and each merged request is still split into daily chunks.
+## Data collection
 
-The CLI automatically loads `.env` beside the selected configuration file. The RPC endpoint is read from `ROBINHOOD_RPC_URL` and is not stored in the TOML configuration snapshot. Blockscout requests use the unified Pro endpoint `https://api.blockscout.com/v2/api` with `chainid=4663` and the API key supplied as `apikey`.
+The collector uses these sources:
 
-`process` atomically writes these files below `output`:
+- Alpha Vantage supplies dividend CSV data.
+- The Robinhood assets endpoint supplies token deployments and current multipliers.
+- Blockscout supplies blocks and contract event logs.
+- The Robinhood Chain RPC supplies contract metadata, block timestamps, and historical supply values.
 
-- `dividends.csv`, `tokens.csv`, `pools.csv`, `multiplier_updates.csv`
-- `mint_burn_events.csv`, `mint_burn_daily.csv`, `mint_burn_transitions.csv`
-- `swaps.csv`, `swaps_daily.csv`, `swap_transitions.csv`
+Web3.py decodes events with the contract ABIs in `abis`. The project does not use manual event-byte parsing.
 
-Mint and burn mean ERC-20 transfers from or to the zero address. Swap signs are pool deltas: a negative stock delta means the trader bought stock; a negative USDG delta means the trader bought stablecoin.
+### Raw data and cache
 
-## Notebook
+The collector stores source responses in `data/raw`. It identifies each cached response from its source and request parameters.
 
-Run `notebooks/analysis.ipynb` after processing. It reads only the processed CSVs and downloads Yahoo daily prices in memory. Set `STOCK_ACTIVITY_OUTPUT_DIR` to use a non-default output directory. For deterministic/offline execution, set `STOCK_ACTIVITY_YAHOO_FIXTURE` to a JSON object mapping each ticker to `{"YYYY-MM-DD": close}`; the fixture is read into memory and is never copied into the raw data contract.
+`data/raw/manifest.json` records this information:
+
+- Request parameters
+- Collection times
+- Configuration snapshots
+- SHA-256 checksums
+- Completed collection metadata
+
+API keys and the RPC URL do not appear in cached request identities.
+
+The collector reuses a cached response when its request identity matches a prior request. This behavior makes an interrupted collection resumable.
+
+## Processed output
+
+The processor writes CSV files to the configured output directory.
+
+| File | Content |
+|---|---|
+| `dividends.csv` | Filtered dividend records |
+| `tokens.csv` | Stock-token addresses, decimals, and asset metadata |
+| `pools.csv` | Pool addresses, currencies, fees, and decimals |
+| `multiplier_updates.csv` | Decoded multiplier updates and nearest dividend dates |
+| `mint_burn_events.csv` | Mint and burn events in general activity windows |
+| `mint_burn_daily.csv` | Daily mint, burn, and net issuance totals |
+| `mint_burn_transitions.csv` | Mint and burn events from emission until effectiveness |
+| `swaps.csv` | Decoded swaps in general activity windows |
+| `swaps_daily.csv` | Daily swap counts and amounts |
+| `swap_transitions.csv` | Swaps in symmetric transition windows |
+
+The processor writes each file atomically.
+
+### Event conventions
+
+- A mint is an ERC-20 transfer from the zero address.
+- A burn is an ERC-20 transfer to the zero address.
+- Swap amounts use pool delta signs.
+- A negative stock delta means that the trader bought stock.
+- A negative USDG delta means that the trader bought USDG.
+
+The collector keeps multiplier updates with future effective times. These rows use `snapshot_status=future_effective_time`.
+
+The collector leaves the pre-effective supply fields empty for these rows. A later collection can create the snapshot.
+
+## Analysis notebook
+
+Run the notebook after the processor creates the CSV files:
 
 ```bash
 jupyter execute notebooks/analysis.ipynb
+```
+
+The notebook reads only processed CSV files. It downloads Yahoo Finance daily prices into memory.
+
+Set `STOCK_ACTIVITY_OUTPUT_DIR` to select a different output directory.
+
+Set `STOCK_ACTIVITY_YAHOO_FIXTURE` for deterministic offline prices. Use this JSON structure:
+
+```json
+{
+  "AAPL": {
+    "2026-08-10": 100.0
+  }
+}
+```
+
+The notebook reads the fixture into memory. It does not copy the fixture into `data/raw`.
+
+## Tests
+
+Run the unit tests:
+
+```bash
 pytest
 ```
 
-Future multiplier effective times are retained with `snapshot_status=future_effective_time`; their pre-effective supply snapshot stays blank until a later collection run.
+Run the live service test:
+
+```bash
+RUN_LIVE_TESTS=1 pytest -m live
+```
+
+The live test checks the Robinhood assets endpoint and the configured chain RPC.
