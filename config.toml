@@ -1,0 +1,49 @@
+[chain]
+id = 4663
+pool_manager = "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+stablecoin_address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
+
+[services]
+alpha_vantage_url = "https://www.alphavantage.co/query"
+robinhood_assets_url = "https://api.robinhood.com/rhj/assets"
+blockscout_url = "https://api.blockscout.com/v2/api"
+request_timeout = 30
+retries = 4
+
+[window]
+ex_date_start = "2026-07-01"
+ex_date_end = "2026-09-30"
+days_before_ex_date = 7
+days_after_effective = 7
+
+[paths]
+raw_dir = "data/raw"
+output_dir = "output"
+
+[[ticker]]
+symbol = "AAPL"
+pool = { type = "v4", address = "0xc748f4671a867db48b552f6b7650bf3255e05f80f00e3f7aad1b17ccb7898fdb" }
+
+[[ticker]]
+symbol = "NVDA"
+pool = { type = "v3", address = "0xd4eb21209c4d6093f80b5b84f5c45cc093ea14a3" }
+
+[[ticker]]
+symbol = "GOOGL"
+pool = { type = "v3", address = "0x34d0dc122cf9a8eb296fc5e0d3a233625d7d19b7" }
+
+[[ticker]]
+symbol = "MSFT"
+pool = { type = "v3", address = "0xeb60bcd1d920ad6e102690ccfc6fb488899e1510" }
+
+[[ticker]]
+symbol = "META"
+pool = { type = "v4", address = "0x5875d407a42965b0e768c8925cea290e06fa50603ef34fc99eb92a1050e6ae36" }
+
+[[ticker]]
+symbol = "MU"
+pool = { type = "v3", address = "0xd057b1bc54917855bbee58ead58647f47cab35e5" }
+
+[[ticker]]
+symbol = "COST"
+pool = { type = "v3", address = "0x0a2121a50a09ed0796ae81f9c53ff9398355a398" }
