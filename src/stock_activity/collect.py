@@ -8,7 +8,7 @@ import tomllib
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from web3 import HTTPProvider, Web3
 
@@ -51,7 +51,36 @@ def _web3_call(callable_: Any, retries: int) -> Any:
     raise ServiceError(f"Web3 RPC call failed after {retries + 1} attempts: {error}")
 
 
-def _fetch_alpha(settings: Settings, http: HttpService, store: RawStore, symbol: str) -> list[dict[str, Any]]:
+class RequestPacer:
+    def __init__(
+        self,
+        minimum_interval: float,
+        *,
+        clock: Callable[[], float] = time_module.monotonic,
+        sleeper: Callable[[float], None] = time_module.sleep,
+    ) -> None:
+        self.minimum_interval = minimum_interval
+        self.clock = clock
+        self.sleeper = sleeper
+        self.last_request_at: float | None = None
+
+    def wait(self) -> None:
+        now = self.clock()
+        if self.last_request_at is not None:
+            remaining = self.minimum_interval - (now - self.last_request_at)
+            if remaining > 0:
+                self.sleeper(remaining)
+                now = self.clock()
+        self.last_request_at = now
+
+
+def _fetch_alpha(
+    settings: Settings,
+    http: HttpService,
+    store: RawStore,
+    symbol: str,
+    before_request: Callable[[], None] | None = None,
+) -> list[dict[str, Any]]:
     if not settings.alpha_vantage_api_key:
         raise ServiceError("ALPHAVANTAGE_API_KEY is required for collection")
     request = {"function": "DIVIDENDS", "symbol": symbol, "datatype": "csv"}
@@ -60,6 +89,8 @@ def _fetch_alpha(settings: Settings, http: HttpService, store: RawStore, symbol:
     payload = store.cached("alpha_vantage", cache_params, "csv")
     cache_hit = payload is not None
     if not cache_hit:
+        if before_request is not None:
+            before_request()
         response = http.get(settings.alpha_vantage_url, params)
         payload = response.content
     text = payload.decode("utf-8-sig")
@@ -166,9 +197,10 @@ def collect(settings: Settings) -> Path:
         settings.blockscout_url, settings.blockscout_api_key, settings.chain_id,
         store, settings.request_timeout, settings.retries,
     )
+    alpha_pacer = RequestPacer(settings.alpha_vantage_request_delay)
     dividends: list[dict[str, Any]] = []
     for ticker in settings.tickers:
-        dividends.extend(_fetch_alpha(settings, http, store, ticker.symbol))
+        dividends.extend(_fetch_alpha(settings, http, store, ticker.symbol, alpha_pacer.wait))
     _, tokens = _fetch_assets(settings, http, store)
 
     dates = [date.fromisoformat(row["ex_dividend_date"]) for row in dividends]

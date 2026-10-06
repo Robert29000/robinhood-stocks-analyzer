@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from stock_activity.clients import ServiceError
-from stock_activity.collect import _fetch_alpha
+from stock_activity.collect import RequestPacer, _fetch_alpha
 
 
 class Store:
@@ -55,6 +55,31 @@ def test_alpha_dividends_request_and_cache_valid_csv():
     assert http.requests[0][1]["datatype"] == "csv"
     assert store.saved[0][1]["datatype"] == "csv"
     assert "apikey" not in store.saved[0][1]
+
+
+def test_alpha_request_pacer_waits_between_requests():
+    now = [100.0]
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    pacer = RequestPacer(12, clock=lambda: now[0], sleeper=sleep)
+    pacer.wait()
+    now[0] += 2
+    pacer.wait()
+
+    assert sleeps == [10]
+
+
+def test_alpha_request_pacing_is_skipped_for_cached_data():
+    payload = b"ex_dividend_date,declaration_date,record_date,payment_date,amount\n"
+    calls = []
+
+    _fetch_alpha(settings(), Http(payload), Store(cached=payload), "AAPL", lambda: calls.append("wait"))
+
+    assert calls == []
 
 
 @pytest.mark.parametrize("payload", [

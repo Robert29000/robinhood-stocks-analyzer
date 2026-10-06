@@ -43,6 +43,7 @@ class Settings:
     blockscout_api_key: str | None
     request_timeout: float = 30.0
     retries: int = 4
+    alpha_vantage_request_delay: float = 12.0
 
 
 def _required(table: dict[str, Any], key: str, section: str) -> Any:
@@ -99,6 +100,9 @@ def load_config(path: str | Path) -> Settings:
         raise ValueError("ex_date_end precedes ex_date_start")
     raw_dir = (base / str(paths.get("raw_dir", "data/raw"))).resolve()
     output_dir = (base / str(paths.get("output_dir", "output"))).resolve()
+    alpha_vantage_request_delay = float(services.get("alpha_vantage_request_delay", 12))
+    if alpha_vantage_request_delay < 0:
+        raise ValueError("[services].alpha_vantage_request_delay must be non-negative")
     return Settings(
         config_path=config_path,
         chain_id=chain_id,
@@ -119,4 +123,5 @@ def load_config(path: str | Path) -> Settings:
         blockscout_api_key=os.getenv("BLOCKSCOUT_API_KEY"),
         request_timeout=float(services.get("request_timeout", 30)),
         retries=int(services.get("retries", 4)),
+        alpha_vantage_request_delay=alpha_vantage_request_delay,
     )

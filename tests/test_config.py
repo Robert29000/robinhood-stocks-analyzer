@@ -11,10 +11,11 @@ def test_checked_in_config_has_requested_pools(monkeypatch):
     assert settings.chain_id == 4663
     assert settings.rpc_url == "https://rpc.example.invalid"
     assert settings.blockscout_url == "https://api.blockscout.com/v2/api"
+    assert settings.alpha_vantage_request_delay == 12
     assert [ticker.symbol for ticker in settings.tickers] == ["AAPL", "NVDA", "GOOGL", "MSFT", "META", "MU", "COST"]
     assert {ticker.symbol: ticker.pool.type for ticker in settings.tickers}["AAPL"] == "v4"
     assert settings.ex_date_start.isoformat() == "2026-07-01"
-    assert settings.ex_date_end.isoformat() == "2026-10-05"
+    assert settings.ex_date_end.isoformat() == "2026-09-30"
 
 
 def test_invalid_pool_metadata_is_rejected(tmp_path, monkeypatch):

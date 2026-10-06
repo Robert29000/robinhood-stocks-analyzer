@@ -27,6 +27,8 @@ The actions run sequentially in one CLI invocation: collection must finish succe
 
 `collect` is resumable: request identities are stable, original Alpha Vantage CSV, Robinhood JSON, and every Blockscout response are retained below `data/raw`, and `manifest.json` records parameters, collection time, the configuration snapshot, and SHA-256 checksums. Contract reads need an archive-capable RPC to snapshot `totalSupplyUI()` at the last block strictly before multiplier effectiveness.
 
+Uncached Alpha Vantage requests are spaced by `services.alpha_vantage_request_delay` seconds (12 seconds by default). Cached dividend responses are used immediately without waiting.
+
 The CLI automatically loads `.env` beside the selected configuration file. The RPC endpoint is read from `ROBINHOOD_RPC_URL` and is not stored in the TOML configuration snapshot. Blockscout requests use the unified Pro endpoint `https://api.blockscout.com/v2/api` with `chainid=4663` and the API key supplied as `apikey`.
 
 `process` atomically writes these files below `output`:

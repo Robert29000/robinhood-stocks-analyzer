@@ -9,6 +9,7 @@ robinhood_assets_url = "https://api.robinhood.com/rhj/assets"
 blockscout_url = "https://api.blockscout.com/v2/api"
 request_timeout = 30
 retries = 4
+alpha_vantage_request_delay = 1
 
 [window]
 ex_date_start = "2026-07-01"
