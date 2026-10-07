@@ -10,7 +10,10 @@ ZERO_ADDRESS = "0x" + "0" * 40
 def hex_int(value: Any) -> int:
     if isinstance(value, int):
         return value
-    return int(str(value), 16) if str(value).startswith("0x") else int(str(value))
+    rendered = str(value)
+    if rendered == "0x":
+        return 0
+    return int(rendered, 16) if rendered.startswith("0x") else int(rendered)
 
 
 def utc_from_timestamp(timestamp: int) -> datetime:

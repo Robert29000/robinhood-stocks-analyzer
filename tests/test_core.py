@@ -9,10 +9,15 @@ from eth_abi import encode
 from stock_activity.contracts import ROBINHOOD_STOCK, UNISWAP_V3_POOL, UNISWAP_V4_POOL_MANAGER, event_topic
 from stock_activity.decoders import decode_multiplier, decode_swap, decode_transfer, decode_v4_initialize
 from stock_activity.process import associate_dividend, daily_transfers, transition_rows
+from stock_activity.utils import hex_int
 
 
 MULTIPLIER_TOPIC = event_topic(ROBINHOOD_STOCK.events.UIMultiplierUpdated)
 TRANSFER_TOPIC = event_topic(ROBINHOOD_STOCK.events.Transfer)
+
+
+def test_empty_explorer_hex_quantity_is_zero():
+    assert hex_int("0x") == 0
 
 
 def topic_address(value: str) -> str:
