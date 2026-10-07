@@ -23,6 +23,12 @@ def parser() -> argparse.ArgumentParser:
         "--from", "--start-from", dest="start_from", choices=COLLECT_STEPS, default="alpha",
         help="collection step to start from; assets and logs use the last checkpoint",
     )
+    root.add_argument(
+        "--event-source",
+        choices=("rpc", "blockscout"),
+        default="rpc",
+        help="service used to fetch contract events (default: rpc)",
+    )
     return root
 
 
@@ -57,13 +63,20 @@ def main(argv: list[str] | None = None) -> int:
         argument_parser.error("collect must precede process")
     if "collect" not in args.actions and args.start_from != "alpha":
         argument_parser.error("--from can only be used with collect")
+    if "collect" not in args.actions and args.event_source != "rpc":
+        argument_parser.error("--event-source can only be used with collect")
     try:
         settings = load_config(args.config)
         for action in args.actions:
             if action == "collect":
                 visualizer = CollectVisualizer()
                 try:
-                    path = collect(settings, start_from=args.start_from, progress=visualizer.update)
+                    path = collect(
+                        settings,
+                        start_from=args.start_from,
+                        event_source=args.event_source,
+                        progress=visualizer.update,
+                    )
                 finally:
                     visualizer.finish()
                 print(f"collected: {path}")

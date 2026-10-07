@@ -10,9 +10,17 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from web3 import HTTPProvider, Web3
+from web3 import Web3
 
-from .clients import BlockscoutClient, HttpService, ServiceError
+from .clients import (
+    BlockscoutClient,
+    EventClient,
+    HttpService,
+    PacedHTTPProvider,
+    RequestPacer,
+    RpcClient,
+    ServiceError,
+)
 from .config import Settings
 from .contracts import (
     ROBINHOOD_STOCK, UNISWAP_V3_POOL, UNISWAP_V4_POOL_MANAGER,
@@ -183,29 +191,6 @@ def _web3_call(callable_: Any, retries: int) -> Any:
     raise ServiceError(f"Web3 RPC call failed after {retries + 1} attempts: {error}")
 
 
-class RequestPacer:
-    def __init__(
-        self,
-        minimum_interval: float,
-        *,
-        clock: Callable[[], float] = time_module.monotonic,
-        sleeper: Callable[[float], None] = time_module.sleep,
-    ) -> None:
-        self.minimum_interval = minimum_interval
-        self.clock = clock
-        self.sleeper = sleeper
-        self.last_request_at: float | None = None
-
-    def wait(self) -> None:
-        now = self.clock()
-        if self.last_request_at is not None:
-            remaining = self.minimum_interval - (now - self.last_request_at)
-            if remaining > 0:
-                self.sleeper(remaining)
-                now = self.clock()
-        self.last_request_at = now
-
-
 def _fetch_alpha(
     settings: Settings,
     http: HttpService,
@@ -298,7 +283,7 @@ def _timestamp_logs(web3: Web3, logs: list[dict[str, Any]], retries: int) -> Non
 
 
 def _mint_burn_logs(
-    blockscout: BlockscoutClient,
+    event_client: EventClient,
     chain_id: int,
     token_address: str,
     start: datetime,
@@ -308,7 +293,7 @@ def _mint_burn_logs(
     found: dict[str, dict[str, Any]] = {}
     for indexed_address in ("topic1", "topic2"):
         topics = {"topic0": transfer_topic, indexed_address: ZERO_ADDRESS_TOPIC}
-        for item in blockscout.logs_full_range(token_address, topics, start, end):
+        for item in event_client.logs_full_range(token_address, topics, start, end):
             found[log_id(chain_id, item)] = item
     return sorted(
         found.values(),
@@ -325,7 +310,7 @@ def _swap_topics(pool_type: str, pool_ref: str) -> dict[str, str]:
 
 
 def _pool_metadata(
-    settings: Settings, web3: Web3, blockscout: BlockscoutClient,
+    settings: Settings, web3: Web3, blockscout: BlockscoutClient, event_client: EventClient,
     ticker: str, pool_type: str, pool_ref: str, stock_token: str, end: datetime,
 ) -> dict[str, Any]:
     if pool_type == "v3":
@@ -337,7 +322,9 @@ def _pool_metadata(
     else:
         last = blockscout.block_at(int(end.timestamp()) - 1, "before")
         initialize_topic = event_topic(UNISWAP_V4_POOL_MANAGER.events.Initialize)
-        logs = blockscout.logs_blocks(settings.pool_manager, {"topic0": initialize_topic, "topic1": pool_ref}, 0, last)
+        logs = event_client.logs_blocks(
+            settings.pool_manager, {"topic0": initialize_topic, "topic1": pool_ref}, 0, last,
+        )
         if len(logs) != 1:
             raise ServiceError(f"{ticker}: expected one PoolManager Initialize event for {pool_ref}, found {len(logs)}")
         metadata = decode_v4_initialize(logs[0])
@@ -359,10 +346,13 @@ def _pool_metadata(
 def collect(
     settings: Settings,
     start_from: str = "alpha",
+    event_source: str = "rpc",
     progress: Progress | None = None,
 ) -> Path:
     if start_from not in COLLECT_STEPS:
         raise ValueError(f"unknown collection step: {start_from}")
+    if event_source not in {"blockscout", "rpc"}:
+        raise ValueError(f"unknown event source: {event_source}")
     if not settings.blockscout_api_key:
         raise ServiceError("BLOCKSCOUT_API_KEY is required for the Blockscout Pro API")
     report = progress or (lambda phase, detail: None)
@@ -370,11 +360,29 @@ def collect(
     config_snapshot = tomllib.loads(settings.config_path.read_text(encoding="utf-8"))
     store = RawStore(settings.raw_dir, config_snapshot)
     http = HttpService(settings.request_timeout, settings.retries)
-    web3 = Web3(HTTPProvider(settings.rpc_url, request_kwargs={"timeout": settings.request_timeout}))
     blockscout = BlockscoutClient(
         settings.blockscout_url, settings.blockscout_api_key, settings.chain_id,
         store, settings.request_timeout, settings.retries,
     )
+    rpc_pacer = RequestPacer(RpcClient.REQUEST_INTERVAL)
+    web3 = Web3(PacedHTTPProvider(
+        settings.rpc_url,
+        rpc_pacer.wait,
+        request_kwargs={"timeout": settings.request_timeout},
+    ))
+    event_client: EventClient
+    if event_source == "rpc":
+        event_client = RpcClient(
+            settings.rpc_url,
+            settings.chain_id,
+            store,
+            blockscout,
+            settings.request_timeout,
+            settings.retries,
+            rpc_pacer,
+        )
+    else:
+        event_client = blockscout
     alpha_pacer = RequestPacer(settings.alpha_vantage_request_delay)
     checkpoint = _load_checkpoint(settings, start_from) if start_from != "alpha" else None
 
@@ -423,12 +431,12 @@ def collect(
         found_logs: dict[str, dict[str, Any]] = {}
         found_transfers: dict[str, dict[str, Any]] = {}
         for scan_start, scan_end in multiplier_queries.get(ticker.symbol, []):
-            for log in blockscout.logs_full_range(
+            for log in event_client.logs_full_range(
                 token_address, {"topic0": multiplier_topic}, scan_start, scan_end,
             ):
                 found_logs[log_id(settings.chain_id, log)] = log
             for item in _mint_burn_logs(
-                blockscout, settings.chain_id, token_address, scan_start, scan_end,
+                event_client, settings.chain_id, token_address, scan_start, scan_end,
             ):
                 found_transfers[log_id(settings.chain_id, item)] = item
         logs = sorted(
@@ -470,13 +478,15 @@ def collect(
     for index, ticker in enumerate(settings.tickers, 1):
         report("Chain logs", f"swaps for {ticker.symbol} ({index}/{len(settings.tickers)})")
         token_row = token_by_ticker[ticker.symbol]
-        pool = _pool_metadata(settings, web3, blockscout, ticker.symbol, ticker.pool.type, ticker.pool.address,
-                              token_row["token_address"], collection_cutoff)
+        pool = _pool_metadata(
+            settings, web3, blockscout, event_client, ticker.symbol, ticker.pool.type,
+            ticker.pool.address, token_row["token_address"], collection_cutoff,
+        )
         pools.append(pool)
         topics = _swap_topics(ticker.pool.type, ticker.pool.address)
         found_swaps: dict[str, dict[str, Any]] = {}
         for swap_start, swap_end in swap_queries.get(ticker.symbol, []):
-            for item in blockscout.logs(pool["swap_emitter"], topics, swap_start, swap_end):
+            for item in event_client.logs(pool["swap_emitter"], topics, swap_start, swap_end):
                 found_swaps[log_id(settings.chain_id, item)] = item
         swaps = sorted(
             found_swaps.values(),
@@ -486,7 +496,7 @@ def collect(
         swap_logs.extend({"ticker": ticker.symbol, "log": item} for item in swaps)
 
     collection = {
-        "schema_version": 3, "chain_id": settings.chain_id,
+        "schema_version": 3, "chain_id": settings.chain_id, "event_source": event_source,
         "resume_key": _resume_key(settings),
         "collection_cutoff": collection_cutoff.isoformat(),
         "multiplier_scan_windows": multiplier_scan_windows,
@@ -499,6 +509,7 @@ def collect(
     atomic_json(path, collection)
     store.record_run(started_at, {
         "collection_path": str(path.relative_to(settings.raw_dir)),
+        "event_source": event_source,
         "dividend_count": len(dividends), "multiplier_update_count": len(updates),
         "multiplier_scan_window_count": len(multiplier_scan_windows),
         "swap_window_count": len(swap_windows),

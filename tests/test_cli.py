@@ -68,7 +68,22 @@ def test_collect_start_step_and_progress_are_passed_to_collector(monkeypatch, tm
 
     assert cli.main(["collect", "--from", "logs"]) == 0
     assert received["start_from"] == "logs"
+    assert received["event_source"] == "rpc"
     assert callable(received["progress"])
+
+
+def test_event_source_is_passed_to_collector(monkeypatch, tmp_path):
+    settings = SimpleNamespace(output_dir=tmp_path / "output")
+    received = {}
+    monkeypatch.setattr(cli, "load_config", lambda path: settings)
+    monkeypatch.setattr(
+        cli,
+        "collect",
+        lambda received_settings, **kwargs: received.update(kwargs) or tmp_path / "collection.json",
+    )
+
+    assert cli.main(["collect", "--event-source", "blockscout"]) == 0
+    assert received["event_source"] == "blockscout"
 
 
 def test_non_interactive_visualizer_prints_only_phase_changes():

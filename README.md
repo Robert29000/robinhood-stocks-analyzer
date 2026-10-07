@@ -102,17 +102,19 @@ dividend_scan_padding_days = 7
 
 The collector merges overlapping ranges for each ticker. This merge prevents duplicate requests.
 
-Multiplier, mint, and burn requests start with the complete merged range.
-Blockscout ranges that reach the 1,000-log response limit are divided by block
-until each response is below the limit. Swap requests use daily UTC chunks and
-the same limit-based splitting. The collector removes duplicate logs after collection.
+Multiplier, mint, and burn requests start with the complete merged range. Swap
+requests use daily UTC chunks. The collector recursively divides a block range
+when a response reaches its source limit: 10,000 logs for RPC and 1,000 logs for
+Blockscout. RPC requests are also limited to 10,000 blocks per request. The
+collector removes duplicate logs after collection.
 
 ### Services
 
 The `[services]` section controls service URLs, timeouts, retries, and Alpha Vantage request spacing.
 
 The collector waits only before an uncached Alpha Vantage request. It does not wait before it reads a cached response.
-Blockscout network requests start at least 0.3 seconds apart. Existing retry backoff applies after errors.
+Blockscout network requests start at least 0.3 seconds apart. RPC requests start
+at least 0.1 seconds apart. Existing retry backoff applies after errors.
 
 ## Run the application
 
@@ -128,6 +130,17 @@ The CLI completes collection before it starts processing. You can also run one a
 stock-activity collect --config config.toml
 stock-activity process --config config.toml
 ```
+
+RPC is the default source for contract event data. Select Blockscout when needed:
+
+```bash
+stock-activity collect --event-source rpc --config config.toml
+stock-activity collect --event-source blockscout --config config.toml
+```
+
+Both modes use Blockscout to translate timestamps into block numbers. The
+selected event source is used for multiplier, mint/burn, swap, and V4 pool
+initialization logs.
 
 Collection shows the current source and ticker on one terminal line. To resume
 from a completed phase after an interruption, select its next start point:
@@ -150,8 +163,8 @@ The collector uses these sources:
 
 - Alpha Vantage supplies dividend CSV data.
 - The Robinhood assets endpoint supplies token deployments and current multipliers.
-- Blockscout supplies blocks and contract event logs.
-- The Robinhood Chain RPC supplies contract metadata, block timestamps, and historical supply values.
+- Blockscout translates timestamps into block numbers and can optionally supply contract event logs.
+- The Robinhood Chain RPC supplies event logs by default, plus contract metadata, block timestamps, and historical supply values.
 
 Web3.py decodes events with the contract ABIs in `abis`. The project does not use manual event-byte parsing.
 
@@ -240,4 +253,5 @@ Run the live service test:
 RUN_LIVE_TESTS=1 pytest -m live
 ```
 
-The live test checks the Robinhood assets endpoint and the configured chain RPC.
+The live test checks the Robinhood assets endpoint and the RPC configured by
+`ROBINHOOD_RPC_URL`.
