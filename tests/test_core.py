@@ -27,7 +27,7 @@ def log(data: bytes, topics: list[str | None], timestamp: int = 100, index: int 
     }
 
 
-def test_blockscout_null_topic_padding_is_ignored():
+def test_explorer_null_topic_padding_is_ignored():
     zero = "0x" + "0" * 40
     alice = "0x" + "11" * 20
     item = log(

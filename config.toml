@@ -6,10 +6,12 @@ stablecoin_address = "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168"
 [services]
 alpha_vantage_url = "https://www.alphavantage.co/query"
 robinhood_assets_url = "https://api.robinhood.com/rhj/assets"
-blockscout_url = "https://api.blockscout.com/v2/api"
+explorer_url = "https://api.etherscan.io/v2/api"
 request_timeout = 30
 retries = 4
 alpha_vantage_request_delay = 2
+explorer_request_delay = 0.5
+explorer_log_limit = 1000
 
 [window]
 ex_date_start = "2026-07-01"

@@ -13,8 +13,8 @@ from typing import Any, Callable, Iterator
 from web3 import Web3
 
 from .clients import (
-    BlockscoutClient,
     EventClient,
+    ExplorerClient,
     HttpService,
     PacedHTTPProvider,
     RequestPacer,
@@ -310,7 +310,7 @@ def _swap_topics(pool_type: str, pool_ref: str) -> dict[str, str]:
 
 
 def _pool_metadata(
-    settings: Settings, web3: Web3, blockscout: BlockscoutClient, event_client: EventClient,
+    settings: Settings, web3: Web3, explorer: ExplorerClient, event_client: EventClient,
     ticker: str, pool_type: str, pool_ref: str, stock_token: str, end: datetime,
 ) -> dict[str, Any]:
     if pool_type == "v3":
@@ -320,7 +320,7 @@ def _pool_metadata(
         fee = int(_web3_call(contract.functions.fee().call, settings.retries))
         metadata = {"token0": token0, "token1": token1, "fee": fee, "tick_spacing": "", "hooks": ""}
     else:
-        last = blockscout.block_at(int(end.timestamp()) - 1, "before")
+        last = explorer.block_at(int(end.timestamp()) - 1, "before")
         initialize_topic = event_topic(UNISWAP_V4_POOL_MANAGER.events.Initialize)
         logs = event_client.logs_blocks(
             settings.pool_manager, {"topic0": initialize_topic, "topic1": pool_ref}, 0, last,
@@ -351,18 +351,24 @@ def collect(
 ) -> Path:
     if start_from not in COLLECT_STEPS:
         raise ValueError(f"unknown collection step: {start_from}")
-    if event_source not in {"blockscout", "rpc"}:
+    if event_source not in {"explorer", "rpc"}:
         raise ValueError(f"unknown event source: {event_source}")
-    if not settings.blockscout_api_key:
-        raise ServiceError("BLOCKSCOUT_API_KEY is required for the Blockscout Pro API")
+    if not settings.explorer_api_key:
+        raise ServiceError("EXPLORER_API_KEY is required for timestamp-to-block lookup")
     report = progress or (lambda phase, detail: None)
     started_at = datetime.now(timezone.utc).isoformat()
     config_snapshot = tomllib.loads(settings.config_path.read_text(encoding="utf-8"))
     store = RawStore(settings.raw_dir, config_snapshot)
     http = HttpService(settings.request_timeout, settings.retries)
-    blockscout = BlockscoutClient(
-        settings.blockscout_url, settings.blockscout_api_key, settings.chain_id,
-        store, settings.request_timeout, settings.retries,
+    explorer = ExplorerClient(
+        settings.explorer_url,
+        settings.explorer_api_key,
+        settings.chain_id,
+        store,
+        settings.request_timeout,
+        settings.retries,
+        settings.explorer_request_delay,
+        settings.explorer_log_limit,
     )
     rpc_pacer = RequestPacer(RpcClient.REQUEST_INTERVAL)
     web3 = Web3(PacedHTTPProvider(
@@ -376,13 +382,13 @@ def collect(
             settings.rpc_url,
             settings.chain_id,
             store,
-            blockscout,
+            explorer,
             settings.request_timeout,
             settings.retries,
             rpc_pacer,
         )
     else:
-        event_client = blockscout
+        event_client = explorer
     alpha_pacer = RequestPacer(settings.alpha_vantage_request_delay)
     checkpoint = _load_checkpoint(settings, start_from) if start_from != "alpha" else None
 
@@ -457,7 +463,7 @@ def collect(
             now = datetime.now(timezone.utc)
             effective = datetime.fromtimestamp(row["effective_timestamp"], tz=timezone.utc)
             if effective <= now:
-                block = blockscout.block_at(row["effective_timestamp"] - 1, "before")
+                block = explorer.block_at(row["effective_timestamp"] - 1, "before")
                 row["pre_effective_block"] = block
                 row["total_supply_ui_raw"] = int(_web3_call(
                     lambda: token_contract.functions.totalSupplyUI().call(block_identifier=block), settings.retries
@@ -479,7 +485,7 @@ def collect(
         report("Chain logs", f"swaps for {ticker.symbol} ({index}/{len(settings.tickers)})")
         token_row = token_by_ticker[ticker.symbol]
         pool = _pool_metadata(
-            settings, web3, blockscout, event_client, ticker.symbol, ticker.pool.type,
+            settings, web3, explorer, event_client, ticker.symbol, ticker.pool.type,
             ticker.pool.address, token_row["token_address"], collection_cutoff,
         )
         pools.append(pool)

@@ -10,7 +10,9 @@ def test_checked_in_config_has_requested_pools(monkeypatch):
     settings = load_config(Path(__file__).parents[1] / "config.toml")
     assert settings.chain_id == 4663
     assert settings.rpc_url == "https://rpc.example.invalid"
-    assert settings.blockscout_url == "https://api.blockscout.com/v2/api"
+    assert settings.explorer_url == "https://api.etherscan.io/v2/api"
+    assert settings.explorer_request_delay == 0.5
+    assert settings.explorer_log_limit == 1_000
     assert [ticker.symbol for ticker in settings.tickers] == ["AAPL", "NVDA", "GOOGL", "MSFT", "META", "MU", "COST"]
     assert {ticker.symbol: ticker.pool.type for ticker in settings.tickers}["AAPL"] == "v4"
     assert settings.ex_date_start.isoformat() == "2026-07-01"
@@ -54,4 +56,22 @@ symbol = "AAPL"
 pool = { type = "v3", address = "0x1111111111111111111111111111111111111111" }
 ''')
     with pytest.raises(ValueError, match="dividend_scan_padding_days"):
+        load_config(config)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("explorer_request_delay", -1),
+    ("explorer_log_limit", 0),
+])
+def test_invalid_explorer_limits_are_rejected(field, value, tmp_path, monkeypatch):
+    monkeypatch.setenv("ROBINHOOD_RPC_URL", "https://rpc.example.invalid")
+    config = tmp_path / "invalid-explorer.toml"
+    config.write_text(f'''
+[services]
+{field} = {value}
+[[ticker]]
+symbol = "AAPL"
+pool = {{ type = "v3", address = "0x1111111111111111111111111111111111111111" }}
+''')
+    with pytest.raises(ValueError, match=field):
         load_config(config)

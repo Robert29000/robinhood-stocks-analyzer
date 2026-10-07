@@ -25,7 +25,7 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument(
         "--event-source",
-        choices=("rpc", "blockscout"),
+        choices=("rpc", "explorer"),
         default="rpc",
         help="service used to fetch contract events (default: rpc)",
     )

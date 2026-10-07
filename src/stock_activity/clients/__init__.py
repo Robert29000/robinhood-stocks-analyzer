@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-# Export time for compatibility with callers that patch the former clients module's clock.
-from . import blockscout as _blockscout
+from . import explorer as _explorer
 from .base import EventClient, HttpService, RequestPacer, ServiceError
-from .blockscout import BlockscoutClient
+from .explorer import ExplorerClient
 from .rpc import PacedHTTPProvider, RpcClient
 
-time = _blockscout.time
+time = _explorer.time
 
 __all__ = [
-    "BlockscoutClient",
     "EventClient",
+    "ExplorerClient",
     "HttpService",
     "PacedHTTPProvider",
     "RequestPacer",

@@ -139,7 +139,7 @@ def test_rpc_single_block_limit_fails_explicitly():
         client._logs_range("0x1", {}, 7, 7)
 
 
-def test_rpc_uses_blockscout_resolver_for_timestamp_ranges():
+def test_rpc_uses_explorer_resolver_for_timestamp_ranges():
     calls = []
     resolver = SimpleNamespace(block_at=lambda timestamp, closest: calls.append((timestamp, closest)) or (
         10 if closest == "after" else 20

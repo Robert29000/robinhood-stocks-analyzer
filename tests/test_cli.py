@@ -82,8 +82,8 @@ def test_event_source_is_passed_to_collector(monkeypatch, tmp_path):
         lambda received_settings, **kwargs: received.update(kwargs) or tmp_path / "collection.json",
     )
 
-    assert cli.main(["collect", "--event-source", "blockscout"]) == 0
-    assert received["event_source"] == "blockscout"
+    assert cli.main(["collect", "--event-source", "explorer"]) == 0
+    assert received["event_source"] == "explorer"
 
 
 def test_non_interactive_visualizer_prints_only_phase_changes():

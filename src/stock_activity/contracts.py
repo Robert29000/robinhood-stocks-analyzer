@@ -39,7 +39,7 @@ def as_web3_log(log: dict[str, Any]) -> dict[str, Any]:
     zero_hash = "0x" + "00" * 32
     return {
         "address": Web3.to_checksum_address(log.get("address", "0x" + "00" * 20)),
-        # Blockscout Pro pads its Etherscan-compatible topics array with nulls.
+        # Some Etherscan-compatible explorers pad their topics array with nulls.
         "topics": [HexBytes(value) for value in log.get("topics", []) if value is not None],
         "data": HexBytes(log.get("data", "0x")),
         "blockNumber": hex_int(log.get("blockNumber", 0)),

@@ -87,8 +87,6 @@ class BlockResolver(Protocol):
 
 
 class EventClient:
-    LIMIT: int
-
     def __init__(self, chain_id: int, block_resolver: BlockResolver):
         self.chain_id = chain_id
         self.block_resolver = block_resolver

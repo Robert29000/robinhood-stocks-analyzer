@@ -138,7 +138,7 @@ def test_mint_and_burn_logs_use_separate_indexed_address_filters_and_deduplicate
     zero_to_zero = {"blockNumber": "0x2", "logIndex": "0x0", "transactionHash": "0xboth"}
     burn = {"blockNumber": "0x3", "logIndex": "0x0", "transactionHash": "0xburn"}
 
-    class Blockscout:
+    class Explorer:
         def __init__(self):
             self.calls = []
 
@@ -146,15 +146,15 @@ def test_mint_and_burn_logs_use_separate_indexed_address_filters_and_deduplicate
             self.calls.append((address, topics, range_start, range_end))
             return [mint, zero_to_zero] if "topic1" in topics else [zero_to_zero, burn]
 
-    blockscout = Blockscout()
-    logs = _mint_burn_logs(blockscout, 4663, "0xtoken", start, end)
+    explorer = Explorer()
+    logs = _mint_burn_logs(explorer, 4663, "0xtoken", start, end)
 
     transfer_topic = event_topic(ROBINHOOD_STOCK.events.Transfer)
-    assert [call[1] for call in blockscout.calls] == [
+    assert [call[1] for call in explorer.calls] == [
         {"topic0": transfer_topic, "topic1": ZERO_ADDRESS_TOPIC},
         {"topic0": transfer_topic, "topic2": ZERO_ADDRESS_TOPIC},
     ]
-    assert all(call[0] == "0xtoken" and call[2:] == (start, end) for call in blockscout.calls)
+    assert all(call[0] == "0xtoken" and call[2:] == (start, end) for call in explorer.calls)
     assert logs == [mint, zero_to_zero, burn]
 
 

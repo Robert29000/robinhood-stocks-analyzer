@@ -27,7 +27,7 @@ class Settings:
     config_path: Path
     chain_id: int
     rpc_url: str
-    blockscout_url: str
+    explorer_url: str
     pool_manager: str
     alpha_vantage_url: str
     robinhood_assets_url: str
@@ -39,10 +39,12 @@ class Settings:
     stablecoin_address: str
     tickers: tuple[TickerConfig, ...]
     alpha_vantage_api_key: str | None
-    blockscout_api_key: str | None
+    explorer_api_key: str | None
     request_timeout: float = 30.0
     retries: int = 4
     alpha_vantage_request_delay: float = 12.0
+    explorer_request_delay: float = 0.5
+    explorer_log_limit: int = 1_000
 
 
 def _required(table: dict[str, Any], key: str, section: str) -> Any:
@@ -102,6 +104,12 @@ def load_config(path: str | Path) -> Settings:
     alpha_vantage_request_delay = float(services.get("alpha_vantage_request_delay", 12))
     if alpha_vantage_request_delay < 0:
         raise ValueError("[services].alpha_vantage_request_delay must be non-negative")
+    explorer_request_delay = float(services.get("explorer_request_delay", 0.5))
+    if explorer_request_delay < 0:
+        raise ValueError("[services].explorer_request_delay must be non-negative")
+    explorer_log_limit = int(services.get("explorer_log_limit", 1_000))
+    if explorer_log_limit <= 0:
+        raise ValueError("[services].explorer_log_limit must be positive")
     dividend_scan_padding_days = int(window.get("dividend_scan_padding_days", 7))
     if dividend_scan_padding_days < 0:
         raise ValueError("[window].dividend_scan_padding_days must be non-negative")
@@ -109,7 +117,7 @@ def load_config(path: str | Path) -> Settings:
         config_path=config_path,
         chain_id=chain_id,
         rpc_url=rpc_url,
-        blockscout_url=str(services.get("blockscout_url", "https://api.blockscout.com/v2/api")),
+        explorer_url=str(services.get("explorer_url", "https://api.etherscan.io/v2/api")),
         pool_manager=_address(str(chain.get("pool_manager", "0x8366a39cc670b4001a1121b8f6a443a643e40951")), "pool manager"),
         alpha_vantage_url=str(services.get("alpha_vantage_url", "https://www.alphavantage.co/query")),
         robinhood_assets_url=str(services.get("robinhood_assets_url", "https://api.robinhood.com/rhj/assets")),
@@ -121,8 +129,10 @@ def load_config(path: str | Path) -> Settings:
         stablecoin_address=_address(str(chain.get("stablecoin_address", "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168")), "stablecoin"),
         tickers=tuple(tickers),
         alpha_vantage_api_key=os.getenv("ALPHAVANTAGE_API_KEY"),
-        blockscout_api_key=os.getenv("BLOCKSCOUT_API_KEY"),
+        explorer_api_key=os.getenv("EXPLORER_API_KEY"),
         request_timeout=float(services.get("request_timeout", 30)),
         retries=int(services.get("retries", 4)),
         alpha_vantage_request_delay=alpha_vantage_request_delay,
+        explorer_request_delay=explorer_request_delay,
+        explorer_log_limit=explorer_log_limit,
     )

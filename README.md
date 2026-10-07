@@ -14,7 +14,7 @@ All dates and timestamps use UTC.
 
 - Python 3.11 or a later version
 - An Alpha Vantage API key
-- A Blockscout Pro API key
+- An API key for an Etherscan-compatible explorer
 - An archive-capable Robinhood Chain RPC endpoint
 
 The archive RPC must support historical contract calls. The collector uses these calls for pre-effective supply snapshots.
@@ -45,7 +45,7 @@ The archive RPC must support historical contract calls. The collector uses these
    ```dotenv
    ROBINHOOD_RPC_URL=
    ALPHAVANTAGE_API_KEY=
-   BLOCKSCOUT_API_KEY=
+   EXPLORER_API_KEY=
    ```
 
 The CLI reads `.env` from the directory that contains the selected configuration file.
@@ -104,17 +104,26 @@ The collector merges overlapping ranges for each ticker. This merge prevents dup
 
 Multiplier, mint, and burn requests start with the complete merged range. Swap
 requests use daily UTC chunks. The collector recursively divides a block range
-when a response reaches its source limit: 10,000 logs for RPC and 1,000 logs for
-Blockscout. RPC requests are also limited to 10,000 blocks per request. The
-collector removes duplicate logs after collection.
+when a response reaches its configured source limit: 10,000 logs for RPC and
+`explorer_log_limit` for the explorer. RPC requests are also limited to 10,000
+blocks per request. The collector removes duplicate logs after collection.
 
 ### Services
 
-The `[services]` section controls service URLs, timeouts, retries, and Alpha Vantage request spacing.
+The `[services]` section controls service URLs, timeouts, retries, log limits,
+and request spacing. `explorer_url` can point to an Etherscan-compatible API,
+including Etherscan V2 and Blockscout.
 
-The collector waits only before an uncached Alpha Vantage request. It does not wait before it reads a cached response.
-Blockscout network requests start at least 0.3 seconds apart. RPC requests start
-at least 0.1 seconds apart. Existing retry backoff applies after errors.
+```toml
+[services]
+explorer_url = "https://api.etherscan.io/v2/api"
+explorer_request_delay = 0.5
+explorer_log_limit = 1000
+```
+
+The collector waits only before an uncached request. Explorer requests use
+`explorer_request_delay`; RPC requests start at least 0.1 seconds apart.
+Existing retry backoff applies after errors.
 
 ## Run the application
 
@@ -131,14 +140,15 @@ stock-activity collect --config config.toml
 stock-activity process --config config.toml
 ```
 
-RPC is the default source for contract event data. Select Blockscout when needed:
+RPC is the default source for contract event data. Select the configured
+explorer when needed:
 
 ```bash
 stock-activity collect --event-source rpc --config config.toml
-stock-activity collect --event-source blockscout --config config.toml
+stock-activity collect --event-source explorer --config config.toml
 ```
 
-Both modes use Blockscout to translate timestamps into block numbers. The
+Both modes use the configured explorer to translate timestamps into block numbers. The
 selected event source is used for multiplier, mint/burn, swap, and V4 pool
 initialization logs.
 
@@ -163,7 +173,7 @@ The collector uses these sources:
 
 - Alpha Vantage supplies dividend CSV data.
 - The Robinhood assets endpoint supplies token deployments and current multipliers.
-- Blockscout translates timestamps into block numbers and can optionally supply contract event logs.
+- The configured explorer translates timestamps into block numbers and can optionally supply contract event logs.
 - The Robinhood Chain RPC supplies event logs by default, plus contract metadata, block timestamps, and historical supply values.
 
 Web3.py decodes events with the contract ABIs in `abis`. The project does not use manual event-byte parsing.

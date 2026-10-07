@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 import pytest
 
 import stock_activity.clients as clients_module
-from stock_activity.clients import BlockscoutClient, ServiceError
+from stock_activity.clients import ExplorerClient, ServiceError
 
 
 def client_with(query):
-    client = object.__new__(BlockscoutClient)
+    client = object.__new__(ExplorerClient)
     client.chain_id = 4663
+    client.log_limit = 1_000
     client._query = query
     return client
 
@@ -19,7 +20,7 @@ def make_log(block, index=0):
     return {"blockNumber": hex(block), "logIndex": hex(index), "transactionHash": "0x" + f"{block:064x}"}
 
 
-def test_pro_api_query_includes_chainid_and_does_not_persist_key():
+def test_explorer_query_includes_chainid_and_does_not_persist_key():
     requests, saves = [], []
 
     class Store:
@@ -35,8 +36,8 @@ def test_pro_api_query_includes_chainid_and_does_not_persist_key():
         def json(self):
             return {"status": "1", "result": "123"}
 
-    client = object.__new__(BlockscoutClient)
-    client.url = "https://api.blockscout.com/v2/api"
+    client = object.__new__(ExplorerClient)
+    client.url = "https://api.example.invalid/v2/api"
     client.api_key = "secret"
     client.chain_id = 4663
     client.store = Store()
@@ -46,11 +47,12 @@ def test_pro_api_query_includes_chainid_and_does_not_persist_key():
     assert client._query({"module": "block", "action": "getblocknobytime"})["result"] == "123"
     assert requests[0][1]["chainid"] == 4663
     assert requests[0][1]["apikey"] == "secret"
+    assert saves[0][0] == "explorer"
     assert "apikey" not in saves[0][1]
     assert saves[0][1]["chainid"] == 4663
 
 
-def test_blockscout_requests_start_at_least_point_three_seconds_apart(monkeypatch):
+def test_explorer_uses_configured_request_interval(monkeypatch):
     now = [10.0]
     sleeps = []
 
@@ -86,17 +88,19 @@ def test_blockscout_requests_start_at_least_point_three_seconds_apart(monkeypatc
 
     monkeypatch.setattr(clients_module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(clients_module.time, "sleep", sleep)
-    client = BlockscoutClient("https://example.invalid", "secret", 4663, Store(), 30, 0)
+    client = ExplorerClient(
+        "https://example.invalid", "secret", 4663, Store(), 30, 0, request_interval=0.5,
+    )
     client.client = HttpClient()
 
     client._query({"module": "block", "action": "first"})
     client._query({"module": "block", "action": "second"})
 
-    assert sleeps == [pytest.approx(0.3)]
-    assert [call[0] for call in client.client.calls] == [10.0, pytest.approx(10.3)]
+    assert sleeps == [pytest.approx(0.5)]
+    assert [call[0] for call in client.client.calls] == [10.0, pytest.approx(10.5)]
 
 
-def test_blockscout_error_backoff_is_not_stacked_with_request_interval(monkeypatch):
+def test_explorer_error_backoff_is_not_stacked_with_request_interval(monkeypatch):
     now = [10.0]
     sleeps = []
 
@@ -125,7 +129,7 @@ def test_blockscout_error_backoff_is_not_stacked_with_request_interval(monkeypat
 
     monkeypatch.setattr(clients_module.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(clients_module.time, "sleep", sleep)
-    client = BlockscoutClient("https://example.invalid", "secret", 4663, Store(), 30, 1)
+    client = ExplorerClient("https://example.invalid", "secret", 4663, Store(), 30, 1)
     client.client = HttpClient()
 
     assert client.get(client.url).status_code == 200
@@ -142,6 +146,8 @@ def test_below_limit_does_not_split():
     client = client_with(lambda params: calls.append(params) or {"status": "1", "result": [make_log(1)]})
     assert len(client._logs_range("0x1", {}, 1, 2)) == 1
     assert len(calls) == 1
+    assert calls[0]["page"] == 1
+    assert calls[0]["offset"] == 1_000
 
 
 def test_limit_text_inside_log_payload_does_not_split():
@@ -171,7 +177,7 @@ def test_single_block_limit_fails_explicitly():
 
 
 def test_full_range_logs_use_one_block_range_request():
-    client = object.__new__(BlockscoutClient)
+    client = object.__new__(ExplorerClient)
     client.chain_id = 4663
     block_calls = []
     range_calls = []
