@@ -4,5 +4,4 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 data/raw/
-output/
 .ipynb_checkpoints/
