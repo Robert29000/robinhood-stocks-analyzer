@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+import stock_activity.clients as clients_module
 from stock_activity.clients import BlockscoutClient, ServiceError
 
 
@@ -47,6 +48,88 @@ def test_pro_api_query_includes_chainid_and_does_not_persist_key():
     assert requests[0][1]["apikey"] == "secret"
     assert "apikey" not in saves[0][1]
     assert saves[0][1]["chainid"] == 4663
+
+
+def test_blockscout_requests_start_at_least_point_three_seconds_apart(monkeypatch):
+    now = [10.0]
+    sleeps = []
+
+    class Store:
+        def cached(self, source, params, suffix):
+            return None
+
+        def save(self, source, params, payload, suffix):
+            pass
+
+    class Response:
+        status_code = 200
+        content = b'{"status":"1","result":"123"}'
+        text = content.decode()
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"status": "1", "result": "123"}
+
+    class HttpClient:
+        def __init__(self):
+            self.calls = []
+
+        def get(self, url, params):
+            self.calls.append((now[0], url, params))
+            return Response()
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(clients_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(clients_module.time, "sleep", sleep)
+    client = BlockscoutClient("https://example.invalid", "secret", 4663, Store(), 30, 0)
+    client.client = HttpClient()
+
+    client._query({"module": "block", "action": "first"})
+    client._query({"module": "block", "action": "second"})
+
+    assert sleeps == [pytest.approx(0.3)]
+    assert [call[0] for call in client.client.calls] == [10.0, pytest.approx(10.3)]
+
+
+def test_blockscout_error_backoff_is_not_stacked_with_request_interval(monkeypatch):
+    now = [10.0]
+    sleeps = []
+
+    class Store:
+        pass
+
+    class Response:
+        text = "response"
+
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+        def raise_for_status(self):
+            pass
+
+    class HttpClient:
+        def __init__(self):
+            self.responses = iter((Response(500), Response(200)))
+
+        def get(self, url, params):
+            return next(self.responses)
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(clients_module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(clients_module.time, "sleep", sleep)
+    client = BlockscoutClient("https://example.invalid", "secret", 4663, Store(), 30, 1)
+    client.client = HttpClient()
+
+    assert client.get(client.url).status_code == 200
+    assert sleeps == [pytest.approx(0.5)]
 
 
 def test_v2_block_lookup_reads_nested_block_number():

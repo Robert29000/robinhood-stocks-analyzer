@@ -20,10 +20,14 @@ class HttpService:
         self.client = httpx.Client(timeout=timeout, follow_redirects=True)
         self.retries = retries
 
+    def _before_request(self) -> None:
+        pass
+
     def get(self, url: str, params: dict[str, Any] | None = None) -> httpx.Response:
         error: Exception | None = None
         for attempt in range(self.retries + 1):
             try:
+                self._before_request()
                 response = self.client.get(url, params=params)
                 if response.status_code == 429 or response.status_code >= 500:
                     raise ServiceError(f"transient HTTP {response.status_code}: {response.text[:200]}")
@@ -39,6 +43,7 @@ class HttpService:
 
 class BlockscoutClient(HttpService):
     LIMIT = 1_000
+    REQUEST_INTERVAL = 0.3
 
     def __init__(self, url: str, api_key: str | None, chain_id: int, store: RawStore, timeout: float, retries: int):
         super().__init__(timeout, retries)
@@ -46,6 +51,16 @@ class BlockscoutClient(HttpService):
         self.api_key = api_key
         self.chain_id = chain_id
         self.store = store
+        self._last_request_at: float | None = None
+
+    def _before_request(self) -> None:
+        now = time.monotonic()
+        if self._last_request_at is not None:
+            remaining = self.REQUEST_INTERVAL - (now - self._last_request_at)
+            if remaining > 0:
+                time.sleep(remaining)
+                now = time.monotonic()
+        self._last_request_at = now
 
     def _query(self, params: dict[str, Any]) -> dict[str, Any]:
         request_params = dict(params)

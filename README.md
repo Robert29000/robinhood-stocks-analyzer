@@ -112,6 +112,7 @@ the same limit-based splitting. The collector removes duplicate logs after colle
 The `[services]` section controls service URLs, timeouts, retries, and Alpha Vantage request spacing.
 
 The collector waits only before an uncached Alpha Vantage request. It does not wait before it reads a cached response.
+Blockscout network requests start at least 0.3 seconds apart. Existing retry backoff applies after errors.
 
 ## Run the application
 
